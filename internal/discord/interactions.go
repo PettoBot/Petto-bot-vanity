@@ -845,97 +845,71 @@ func (b *Bot) embedReply(event *discordgo.InteractionCreate, deferred bool, resp
 }
 
 func (b *Bot) handleMemberEvaluation(event *discordgo.InteractionCreate, source identity.Source, dryRun bool) {
-	ctx, cancel := b.operationContext()
-	defer cancel()
 	_, commandOptions := commandPath(event.ApplicationCommandData().Options)
 	option := commandOptions["user"]
-	if !dryRun && option == nil {
-		go b.syncGuildMembers(event.GuildID, source)
-		respond(event, fmt.Sprintf("Manual bounded %s sync started. It will inspect up to %d members; this does not run automatically on restart.", notificationSourceName(source), boundedMemberLimit(b.config.ReconcileMaxUsers)), true)
+
+	if !dryRun {
+		targetUserID := ""
+		if option != nil {
+			targetUserID = optionString(commandOptions, "user")
+		}
+		b.startManualSync(event, source, targetUserID)
 		return
 	}
-	userID := event.Member.User.ID
+
+	userID := actorID(event)
 	if option != nil {
 		userID = optionString(commandOptions, "user")
 	}
-	member, err := b.loadMemberIdentity(ctx, event.GuildID, userID)
+	if userID == "" {
+		respond(event, "Could not determine which member to test.", true)
+		return
+	}
+
+	member, primaryKnown, err := b.loadMemberForSource(event.GuildID, userID, source)
 	if err != nil {
-		respond(event, err.Error(), true)
+		respond(event, "Could not load member data: "+sanitizeSyncMessage(err.Error()), true)
 		return
 	}
 	if member.IsBot {
 		respond(event, "This bot only evaluates human members; bot accounts are ignored.", true)
 		return
 	}
-	vanity, err := b.store.ListVanityRules(ctx, event.GuildID)
+	vanity, tags, err := b.loadManualSyncRules(event.GuildID, source)
 	if err != nil {
-		respond(event, err.Error(), true)
+		respond(event, "Could not load rules: "+sanitizeSyncMessage(err.Error()), true)
 		return
 	}
-	tags, err := b.store.ListGuildTagRules(ctx, event.GuildID)
-	if err != nil {
-		respond(event, err.Error(), true)
-		return
-	}
-	if dryRun {
-		lines := []string{}
-		if source == identity.SourceGuildTag {
-			lines = append(lines, "Primary guild: "+primaryGuildText(member.PrimaryGuild))
+
+	lines := []string{"**Dry run (no role mutations)**"}
+	if source == identity.SourceGuildTag {
+		lines = append(lines, "Primary guild: "+primaryGuildText(member.PrimaryGuild))
+		if !primaryKnown {
+			lines = append(lines, "⚠️ Discord did not provide authoritative `primary_guild` data, so Server Tag rules were **not evaluated** and existing grants would be preserved.")
+			respond(event, strings.Join(lines, "\n"), true)
+			return
 		}
-		if source == identity.SourceVanity || source == "" {
-			for _, rule := range vanity {
-				matched, _ := identity.MatchVanity(rule, member)
-				lines = append(lines, fmt.Sprintf("Vanity `%s` · %s %s `%s`: %t", rule.Name, vanitySourceLabel(rule.Source), comparisonLabel(rule.Comparison), rule.Word, matched))
-			}
-		}
-		if source == identity.SourceGuildTag || source == "" {
-			for _, rule := range tags {
-				lines = append(lines, fmt.Sprintf("Server Tag `%s` · %s: %t", rule.Name, guildTagConditionLabel(rule.Condition), identity.MatchGuildTag(rule, member.PrimaryGuild)))
-			}
-		}
-		respond(event, "**Dry run (no role mutations)**\n"+strings.Join(lines, "\n"), true)
-		return
 	}
 	if source == identity.SourceVanity {
-		tags = nil
-	} else if source == identity.SourceGuildTag {
-		vanity = nil
+		for _, rule := range vanity {
+			if !identity.VanitySourceKnown(member, rule.Source) {
+				lines = append(lines, fmt.Sprintf("Vanity `%s` · %s: unknown (Discord did not provide this value; grant preserved)", rule.Name, vanitySourceLabel(rule.Source)))
+				continue
+			}
+			matched, matchErr := identity.MatchVanity(rule, member)
+			if matchErr != nil {
+				lines = append(lines, fmt.Sprintf("Vanity `%s` · evaluation error: `%s`", rule.Name, sanitizeSyncMessage(matchErr.Error())))
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("Vanity `%s` · %s %s `%s`: %t", rule.Name, vanitySourceLabel(rule.Source), comparisonLabel(rule.Comparison), rule.Word, matched))
+		}
 	}
-	results, err := b.identity.Engine.Evaluate(ctx, member, vanity, tags)
-	if err != nil {
-		respond(event, err.Error(), true)
-		return
-	}
-	message := fmt.Sprintf("Sync complete for <@%s>: %d roles evaluated. Discord changes are serialized per guild.", userID, len(results))
 	if source == identity.SourceGuildTag {
-		message += "\nPrimary guild: " + primaryGuildText(member.PrimaryGuild)
-	}
-	roleErrors := make([]string, 0)
-	for _, result := range results {
-		if result.Error != nil {
-			roleErrors = append(roleErrors, fmt.Sprintf("<@&%s>: %s", result.RoleID, result.Error.Error()))
+		for _, rule := range tags {
+			lines = append(lines, fmt.Sprintf("Server Tag `%s` · %s: %t", rule.Name, guildTagConditionLabel(rule.Condition), identity.MatchGuildTag(rule, member.PrimaryGuild)))
 		}
 	}
-	if len(roleErrors) > 0 {
-		message += "\nRole errors:\n" + strings.Join(roleErrors, "\n")
-	}
-	respond(event, message, true)
-}
-
-func (b *Bot) syncGuildMembers(guildID string, source identity.Source) {
-	limit := boundedMemberLimit(b.config.ReconcileMaxUsers)
-	members, err := b.fetchGuildMembersPaginated(context.Background(), guildID, limit)
-	if err != nil {
-		b.logger.Error("manual guild sync member fetch failed", "guild_id", guildID, "source", source, "error", err)
-		return
-	}
-	for _, member := range members {
-		if member == nil || member.User == nil || member.User.Bot {
-			continue
-		}
-		b.evaluateMemberForSource(guildID, b.cachedMemberIdentity(guildID, member, nil), source)
-	}
-	b.logger.Info("manual guild sync completed", "guild_id", guildID, "source", source, "members", len(members), "limit", limit)
+	respond(event, strings.Join(lines, "\n"), true)
 }
 
 func primaryGuildText(primary *identity.PrimaryGuild) string {

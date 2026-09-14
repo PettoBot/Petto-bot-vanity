@@ -68,7 +68,7 @@ func vanityOptions() []*discordgo.ApplicationCommandOption {
 		sub("remove", "Soft-delete a Vanity rule", []*discordgo.ApplicationCommandOption{stringOption("name", "Rule name", true, 1, 64)}),
 		sub("list", "List Vanity rules", nil),
 		sub("test", "Dry-run Vanity rules for a member", []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionUser, Name: "user", Description: "Member to evaluate", Required: false}}),
-		sub("sync", "Synchronize Vanity rules with a bounded queue", []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionUser, Name: "user", Description: "Only this member", Required: false}}),
+		sub("sync", "Synchronize Vanity rules with live progress", []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionUser, Name: "user", Description: "Only this member", Required: false}}),
 		sub("notify", "Configure the Vanity message sent to matched members", notifyOptions()),
 	}
 }
@@ -80,7 +80,7 @@ func guildTagOptions() []*discordgo.ApplicationCommandOption {
 		sub("remove", "Soft-delete a Server Tag rule", []*discordgo.ApplicationCommandOption{stringOption("name", "Rule name", true, 1, 64)}),
 		sub("list", "List Server Tag rules", nil),
 		sub("test", "Dry-run Server Tag rules for a member", []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionUser, Name: "user", Description: "Member to evaluate", Required: false}}),
-		sub("sync", "Synchronize Server Tag rules with a bounded queue", []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionUser, Name: "user", Description: "Only this member", Required: false}}),
+		sub("sync", "Synchronize Server Tag rules with live progress", []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionUser, Name: "user", Description: "Only this member", Required: false}}),
 		sub("notify", "Configure the Guild Tag message sent to matched members", notifyOptions()),
 	}
 }

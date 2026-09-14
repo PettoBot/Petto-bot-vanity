@@ -364,3 +364,36 @@ func TestSkippedGuildTagEvaluationPreservesManagedGrant(t *testing.T) {
 		t.Fatalf("expected previous Guild Tag grant to remain active, got %d", active)
 	}
 }
+
+func TestUnknownCustomStatusPreservesPreviousGrant(t *testing.T) {
+	ledger := NewMemoryLedger()
+	roles := &fakeRoles{}
+	engine := Engine{Store: ledger, Roles: roles}
+	rule := VanityRule{ID: "status-rule", GuildID: "guild", Name: "status", Word: "petto", Source: VanityCustomStatus, Comparison: ComparisonContains, RoleID: "role", Action: ActionAddRole, Enabled: true}
+	member := MemberIdentity{GuildID: "guild", UserID: "user", CustomStatus: "petto forever", RoleIDs: map[string]struct{}{}}
+
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{rule}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.added) != 1 {
+		t.Fatalf("expected initial role add, got %#v", roles.added)
+	}
+
+	member.RoleIDs["role"] = struct{}{}
+	member.CustomStatus = ""
+	member.UnknownVanitySources = map[VanitySource]struct{}{VanityCustomStatus: {}}
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{rule}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.removed) != 0 {
+		t.Fatalf("unknown custom status removed a previously justified role: %#v", roles.removed)
+	}
+
+	member.UnknownVanitySources = nil
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{rule}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.removed) != 1 {
+		t.Fatalf("known empty custom status should remove the bot-owned role, got %#v", roles.removed)
+	}
+}

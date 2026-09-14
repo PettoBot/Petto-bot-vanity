@@ -65,6 +65,7 @@ func (b *Bot) registerEventHandlers() {
 		}
 		resolved := memberIdentity(event.GuildID, member, nil)
 		resolved.CustomStatus = customStatusValue(&event.Presence)
+		resolved.UnknownVanitySources = nil
 		go b.evaluateMemberForSource(event.GuildID, resolved, identity.SourceVanity)
 	})
 	b.session.AddHandler(func(_ *discordgo.Session, event *discordgo.GuildMemberRemove) {
@@ -107,7 +108,7 @@ func (b *Bot) evaluateMember(guildID string, member identity.MemberIdentity) {
 }
 
 func (b *Bot) evaluateMemberForSource(guildID string, member identity.MemberIdentity, source identity.Source) {
-	b.withGuildLock(guildID, func() {
+	b.withIdentityLock(guildID, member.UserID, func() {
 		// Each external operation gets its own timeout. In particular, a slow
 		// Discord /users/:id request for primary_guild must never consume the
 		// context later used for PostgreSQL or Vanity evaluation.
@@ -215,11 +216,17 @@ func memberIdentity(guildID string, member *discordgo.Member, primary *identity.
 
 func (b *Bot) cachedMemberIdentity(guildID string, member *discordgo.Member, primary *identity.PrimaryGuild) identity.MemberIdentity {
 	result := memberIdentity(guildID, member, primary)
+	// Guild member REST payloads do not contain presence/custom-status data.
+	// Mark Custom Status unknown until State proves it has an authoritative
+	// presence snapshot. This prevents manual sync from treating "not cached"
+	// as an empty status and removing a role incorrectly.
+	result.UnknownVanitySources = map[identity.VanitySource]struct{}{identity.VanityCustomStatus: {}}
 	if member == nil || member.User == nil || b.session == nil || b.session.State == nil {
 		return result
 	}
 	if presence, err := b.session.State.Presence(guildID, member.User.ID); err == nil {
 		result.CustomStatus = customStatusValue(presence)
+		delete(result.UnknownVanitySources, identity.VanityCustomStatus)
 	}
 	return result
 }
@@ -248,6 +255,24 @@ func (b *Bot) withGuildLock(guildID string, action func()) {
 		b.guildLocks[guildID] = lock
 	}
 	b.locksMu.Unlock()
+	lock.Lock()
+	defer lock.Unlock()
+	action()
+}
+
+func (b *Bot) withIdentityLock(guildID, userID string, action func()) {
+	// A fixed set of striped locks serializes evaluations for the same member
+	// without forcing every member in a guild through one global mutex. This
+	// keeps manual sync concurrent while still preventing duplicate role
+	// mutations when Gateway events and a sync hit the same user together.
+	const offset32 = uint32(2166136261)
+	const prime32 = uint32(16777619)
+	hash := offset32
+	for _, value := range []byte(guildID + ":" + userID) {
+		hash ^= uint32(value)
+		hash *= prime32
+	}
+	lock := &b.identityLocks[hash%uint32(len(b.identityLocks))]
 	lock.Lock()
 	defer lock.Unlock()
 	action()

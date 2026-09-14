@@ -29,6 +29,9 @@ type Bot struct {
 	embedRenderer        func(embeds.Template, embeds.Variables) (*discordgo.MessageEmbed, error)
 	guildLocks           map[string]*sync.Mutex
 	locksMu              sync.Mutex
+	identityLocks        [64]sync.Mutex
+	manualSyncMu         sync.Mutex
+	manualSyncRunning    map[string]struct{}
 	helpMu               sync.Mutex
 	helpSessions         map[string]helpSession
 	embedPanelMu         sync.Mutex
@@ -72,7 +75,7 @@ func New(cfg config.Config, store *database.Store, logger *slog.Logger) (*Bot, e
 	}
 	bot := &Bot{
 		config: cfg, store: store, session: session, logger: logger,
-		guildLocks: make(map[string]*sync.Mutex), helpSessions: make(map[string]helpSession), embedPanels: make(map[string]embeds.Template),
+		guildLocks: make(map[string]*sync.Mutex), manualSyncRunning: make(map[string]struct{}), helpSessions: make(map[string]helpSession), embedPanels: make(map[string]embeds.Template),
 		requestTimeout: cfg.RequestTimeout, enableReconcile: cfg.EnableReconcile,
 		reconcileInterval: cfg.ReconcileInterval, reconcileMaxUsers: cfg.ReconcileMaxUsers,
 		reconcileConcurrency: cfg.ReconcileConcurrency,

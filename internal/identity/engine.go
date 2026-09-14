@@ -68,11 +68,18 @@ func (e *Engine) Evaluate(ctx context.Context, member MemberIdentity, vanityRule
 		if !rule.Enabled || rule.RoleID == "" {
 			continue
 		}
+		roles[rule.RoleID] = struct{}{}
+		// Some Vanity sources, especially Custom Status during a REST member
+		// sweep, can be temporarily unavailable because Discord does not return
+		// presence data from GuildMembers. Unknown is not the same as empty: do
+		// not rewrite that rule's grant until an authoritative value is known.
+		if !VanitySourceKnown(member, rule.Source) {
+			continue
+		}
 		matched, matchErr := MatchVanity(rule, member)
 		if matchErr != nil {
 			matched = false
 		}
-		roles[rule.RoleID] = struct{}{}
 		matchedValue := VanityValue(member, rule.Source)
 		actionContext := ActionEvent{
 			GuildID: member.GuildID, UserID: member.UserID, RoleID: rule.RoleID, RuleID: rule.ID,

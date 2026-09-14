@@ -13,30 +13,32 @@ import (
 // Config contains only configuration for Vanity Tag Bot. It deliberately does
 // not know anything about Petto's runtime, credentials, or storage.
 type Config struct {
-	DiscordToken         string
-	ApplicationID        string
-	OwnerID              string
-	DatabaseURL          string
-	DeveloperIDs         map[string]struct{}
-	MigrationsDir        string
-	HTTPAddr             string
-	ShardID              int
-	ShardCount           int
-	PresenceText         string
-	EnableReconcile      bool
-	ReconcileInterval    time.Duration
-	ReconcileMaxUsers    int
-	ReconcileConcurrency int
-	GuildQueueSize       int
-	RequestTimeout       time.Duration
-	AssetMaxBytes        int64
-	AssetMaxPixels       int64
-	AllowedAssetHosts    map[string]struct{}
-	WebsiteURL           string
-	DashboardURL         string
-	DocsURL              string
-	SupportURL           string
-	Emojis               map[string]string
+	DiscordToken          string
+	ApplicationID         string
+	OwnerID               string
+	DatabaseURL           string
+	DeveloperIDs          map[string]struct{}
+	MigrationsDir         string
+	HTTPAddr              string
+	ShardID               int
+	ShardCount            int
+	PresenceText          string
+	EnableReconcile       bool
+	ReconcileInterval     time.Duration
+	ReconcileMaxUsers     int
+	ReconcileConcurrency  int
+	ManualSyncMaxUsers    int
+	ManualSyncConcurrency int
+	GuildQueueSize        int
+	RequestTimeout        time.Duration
+	AssetMaxBytes         int64
+	AssetMaxPixels        int64
+	AllowedAssetHosts     map[string]struct{}
+	WebsiteURL            string
+	DashboardURL          string
+	DocsURL               string
+	SupportURL            string
+	Emojis                map[string]string
 }
 
 func Load() (Config, error) {
@@ -79,6 +81,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	c.ReconcileConcurrency, err = intEnv("RECONCILIATION_CONCURRENCY", 2)
+	if err != nil {
+		return Config{}, err
+	}
+	c.ManualSyncMaxUsers, err = intEnv("MANUAL_SYNC_MAX_USERS", 1000)
+	if err != nil {
+		return Config{}, err
+	}
+	c.ManualSyncConcurrency, err = intEnv("MANUAL_SYNC_CONCURRENCY", 4)
 	if err != nil {
 		return Config{}, err
 	}
@@ -130,6 +140,10 @@ func (c Config) Validate() error {
 		return errors.New("RECONCILIATION_MAX_USERS must be positive")
 	case c.ReconcileConcurrency < 1:
 		return errors.New("RECONCILIATION_CONCURRENCY must be positive")
+	case c.ManualSyncMaxUsers < 1:
+		return errors.New("MANUAL_SYNC_MAX_USERS must be positive")
+	case c.ManualSyncConcurrency < 1:
+		return errors.New("MANUAL_SYNC_CONCURRENCY must be positive")
 	case c.GuildQueueSize < 1:
 		return errors.New("GUILD_QUEUE_SIZE must be positive")
 	case c.RequestTimeout < time.Second:

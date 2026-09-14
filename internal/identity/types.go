@@ -99,16 +99,17 @@ type PrimaryGuild struct {
 }
 
 type MemberIdentity struct {
-	GuildID       string
-	UserID        string
-	IsBot         bool
-	Username      string
-	GlobalName    string
-	GuildNickname string
-	DisplayName   string
-	CustomStatus  string
-	PrimaryGuild  *PrimaryGuild
-	RoleIDs       map[string]struct{}
+	GuildID              string
+	UserID               string
+	IsBot                bool
+	Username             string
+	GlobalName           string
+	GuildNickname        string
+	DisplayName          string
+	CustomStatus         string
+	UnknownVanitySources map[VanitySource]struct{}
+	PrimaryGuild         *PrimaryGuild
+	RoleIDs              map[string]struct{}
 }
 
 type RoleGrant struct {

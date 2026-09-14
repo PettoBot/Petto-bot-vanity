@@ -49,6 +49,14 @@ func ResolveDisplayName(member MemberIdentity) string {
 	return member.Username
 }
 
+func VanitySourceKnown(member MemberIdentity, source VanitySource) bool {
+	if member.UnknownVanitySources == nil {
+		return true
+	}
+	_, unknown := member.UnknownVanitySources[source]
+	return !unknown
+}
+
 func VanityValue(member MemberIdentity, source VanitySource) string {
 	switch source {
 	case VanityUsername:

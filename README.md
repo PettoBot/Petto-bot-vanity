@@ -9,7 +9,7 @@ Este proyecto no comparte código de ejecución, base de datos ni secretos con P
 - Go como runtime, `discordgo` para Gateway/REST y `pgx/v5` para PostgreSQL.
 - Sólo comandos slash y componentes de Discord.
 - Migración PostgreSQL idempotente y repositorios con consultas parametrizadas y contextos.
-- Reglas Vanity y Guild Tag con evaluación dry-run, sincronización manual y eventos de miembro y presencia.
+- Reglas Vanity y Guild Tag con evaluación dry-run, sincronización manual con progreso privado en vivo y eventos de miembro y presencia.
 - Ledger de grants por regla y rol: los grants viejos se invalidan al editar, desactivar o eliminar una regla; `remove_role` tiene prioridad cuando coincide, sin retirar roles que Petto no haya añadido.
 - Logs en embeds, auditoría deduplicada y plantillas de embeds con variables seguras.
 - Perfil por servidor del bot mediante `/set`: nickname, avatar, banner y bio, con URL o upload de Discord, detección del formato real de PNG/JPEG/GIF y protección SSRF.
@@ -21,6 +21,8 @@ Este proyecto no comparte código de ejecución, base de datos ni secretos con P
 Petto conserva propiedad explícita de los roles que él mismo añadió. Al editar, desactivar o eliminar una regla, sus grants anteriores dejan de justificar el rol y el miembro vuelve a evaluarse. Si una regla `remove_role` coincide para el mismo rol, gana frente a cualquier `add_role`, pero el bot sólo ejecuta la eliminación cuando su ledger confirma que el rol fue añadido por Petto. Los roles manuales se preservan.
 
 Si Discord omite `primary_guild`, el valor se considera desconocido. Una ausencia no satisface automáticamente condiciones negativas como `is_not_guild_id`, `tag_not_equals` o `identity_disabled`.
+
+`/vanity sync` y `/guildtag sync` cargan una sola instantánea de reglas, paginan miembros y procesan usuarios con concurrencia limitada. El mensaje efímero se edita durante el trabajo con una barra Petto y termina con miembros procesados, decisiones, roles añadidos/removidos y warnings. Vanity no consulta `primary_guild`; si un barrido REST no tiene un Custom Status en la caché de Presence, ese valor se trata como desconocido y los grants de `custom_status` se preservan mientras las demás fuentes Vanity sí se evalúan. Guild Tag usa un timeout corto por usuario y, tras varios fallos consecutivos de Discord, pausa temporalmente esas consultas para no bloquear cientos de miembros; los grants existentes se preservan mientras el dato sea desconocido. `MANUAL_SYNC_MAX_USERS` y `MANUAL_SYNC_CONCURRENCY` controlan los barridos manuales sin cambiar la reconciliación periódica.
 
 ## Desarrollo
 

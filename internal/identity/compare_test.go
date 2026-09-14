@@ -73,8 +73,19 @@ func TestGuildTagConditions(t *testing.T) {
 	if MatchGuildTag(GuildTagRule{Condition: ConditionIdentityEnabled}, &PrimaryGuild{IdentityEnabled: &disabled}) {
 		t.Fatal("disabled identity matched identity_enabled")
 	}
-	if !MatchGuildTag(GuildTagRule{Condition: ConditionIdentityDisabled}, nil) {
-		t.Fatal("nil primary guild must be identity_disabled")
+	for _, condition := range []GuildTagCondition{ConditionIsNotGuildID, ConditionTagNotEquals, ConditionIdentityDisabled} {
+		if MatchGuildTag(GuildTagRule{Condition: condition, Value: "other"}, nil) {
+			t.Fatalf("nil primary guild must be unknown for %s", condition)
+		}
+	}
+	if MatchGuildTag(GuildTagRule{Condition: ConditionIdentityDisabled}, &PrimaryGuild{}) {
+		t.Fatal("omitted identity_enabled must be unknown, not disabled")
+	}
+	if MatchGuildTag(GuildTagRule{Condition: ConditionIsNotGuildID, Value: "707"}, &PrimaryGuild{}) {
+		t.Fatal("omitted identity guild ID must not match a negative comparison")
+	}
+	if MatchGuildTag(GuildTagRule{Condition: ConditionTagNotEquals, Value: "cinn"}, &PrimaryGuild{}) {
+		t.Fatal("omitted visible tag must not match a negative comparison")
 	}
 	if !MatchGuildTag(GuildTagRule{Condition: ConditionIsGuildID, Value: "707"}, &PrimaryGuild{IdentityGuildID: "707"}) {
 		t.Fatal("is_guild_id must match when Discord omits identity_enabled")

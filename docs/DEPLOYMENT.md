@@ -19,7 +19,7 @@ SHARD_ID=0
 PRESENCE_TEXT=Vanity & Guild Tags
 ```
 
-Keep `ASSET_ALLOWED_HOSTS` explicit for external URLs used by `/set avatar` or `/set banner`. Discord CDN uploads are accepted automatically; an empty allowlist still rejects other remote profile assets. Never put credentials in `README.md`, migrations, logs, or onboarding responses.
+Keep `ASSET_ALLOWED_HOSTS` explicit for external URLs used by `/set avatar` or `/set banner`. Discord CDN/media attachment hosts are a built-in trusted allowlist; an empty configured allowlist still rejects every other remote host. Asset redirects and DNS answers are revalidated against SSRF protections, and PNG/JPEG/GIF are identified from downloaded bytes rather than trusting HTTP `Content-Type`. Never put credentials in `README.md`, migrations, logs, or onboarding responses.
 
 ## Startup and health
 
@@ -42,7 +42,7 @@ Role changes are serialized per guild and `discordgo`'s REST limiter/retries are
 
 ## Server Tag limitation
 
-Discord's `primary_guild` object contains `identity_guild_id`, nullable `identity_enabled`, `tag`, and `badge`; `tag` is limited to four characters. The current `discordgo` typed User model does not include this newer object, so raw `USER_UPDATE` decoding is used. Discord does not guarantee that every Server Tag change arrives as a guild-member event. The bot therefore avoids restart-time member polling, processes available events, and exposes `/identity sync`, `/vanity sync`, and `/guildtag sync` as bounded manual recovery commands. Periodic reconciliation stays off unless the environment explicitly enables it.
+Discord's `primary_guild` object contains `identity_guild_id`, nullable `identity_enabled`, `tag`, and `badge`; `tag` is limited to four characters. The current `discordgo` typed User model does not include this newer object, so raw `USER_UPDATE` decoding is used. Discord does not guarantee that every Server Tag change arrives as a guild-member event. Missing `primary_guild` is treated as unknown, so negative comparisons do not match absent values. The bot therefore avoids unbounded restart-time member polling, processes available events, and exposes `/identity sync`, `/vanity sync`, and `/guildtag sync` as bounded manual recovery commands. Member collection is paginated in chunks of at most 1,000, capped at 10,000 per guild and by the configured reconciliation maximum. Periodic reconciliation stays off unless the environment explicitly enables it.
 
 ## Safe rollout
 

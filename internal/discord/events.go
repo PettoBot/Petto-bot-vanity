@@ -280,13 +280,8 @@ func (b *Bot) reconcileOnce(ctx context.Context) {
 		if err != nil || !relevant {
 			continue
 		}
-		limit := b.reconcileMaxUsers
-		if limit > 1000 {
-			limit = 1000
-		}
-		requestCtx, requestCancel := b.operationContext()
-		members, err := b.session.GuildMembers(guild.ID, "", limit, discordgo.WithContext(requestCtx))
-		requestCancel()
+		limit := boundedMemberLimit(b.reconcileMaxUsers)
+		members, err := b.fetchGuildMembersPaginated(ctx, guild.ID, limit)
 		if err != nil {
 			b.logger.Warn("reconciliation member fetch failed", "guild_id", guild.ID, "error", err)
 			continue
@@ -303,7 +298,56 @@ func (b *Bot) reconcileOnce(ctx context.Context) {
 	}
 	close(jobs)
 	workers.Wait()
-	b.logger.Info("bounded reconciliation completed", "max_users_per_guild", b.reconcileMaxUsers, "concurrency", b.reconcileConcurrency)
+	b.logger.Info("bounded reconciliation completed", "max_users_per_guild", boundedMemberLimit(b.reconcileMaxUsers), "concurrency", b.reconcileConcurrency)
+}
+
+const (
+	discordMemberPageSize = 1000
+	maxGuildSyncMembers   = 10000
+)
+
+func boundedMemberLimit(limit int) int {
+	if limit < 1 {
+		return 1
+	}
+	if limit > maxGuildSyncMembers {
+		return maxGuildSyncMembers
+	}
+	return limit
+}
+
+func (b *Bot) fetchGuildMembersPaginated(parent context.Context, guildID string, limit int) ([]*discordgo.Member, error) {
+	limit = boundedMemberLimit(limit)
+	result := make([]*discordgo.Member, 0, limit)
+	after := ""
+	for len(result) < limit {
+		pageSize := discordMemberPageSize
+		if remaining := limit - len(result); remaining < pageSize {
+			pageSize = remaining
+		}
+		requestCtx, cancel := context.WithTimeout(parent, b.requestTimeout)
+		page, err := b.session.GuildMembers(guildID, after, pageSize, discordgo.WithContext(requestCtx))
+		cancel()
+		if err != nil {
+			return result, err
+		}
+		if len(page) == 0 {
+			break
+		}
+		result = append(result, page...)
+		if len(page) < pageSize {
+			break
+		}
+		last := page[len(page)-1]
+		if last == nil || last.User == nil || last.User.ID == "" || last.User.ID == after {
+			break
+		}
+		after = last.User.ID
+	}
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
 }
 
 var _ = json.Valid

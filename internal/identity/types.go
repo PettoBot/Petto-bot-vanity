@@ -180,11 +180,20 @@ type ActionLogger interface {
 	EmitAction(context.Context, ActionEvent) error
 }
 
+type GrantScope struct {
+	RuleID string
+	RoleID string
+	Action Action
+}
+
 type Store interface {
 	ListVanityRules(context.Context, string) ([]VanityRule, error)
 	ListGuildTagRules(context.Context, string) ([]GuildTagRule, error)
+	InvalidateStaleGrants(context.Context, string, string, Source, []GrantScope) error
+	ManagedRoleIDs(context.Context, string, string) ([]string, error)
 	RecordGrant(context.Context, RoleGrant, AuditIntent) (GrantTransition, error)
 	ActiveRoleSources(context.Context, string, string, string) (int, error)
+	ActiveRoleRemovals(context.Context, string, string, string) (int, error)
 	GetRoleState(context.Context, string, string, string) (RoleState, error)
 	ObserveRolePresence(context.Context, string, string, string, bool) error
 	MarkBotAdded(context.Context, string, string, string) error

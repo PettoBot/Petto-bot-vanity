@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/PettoBot/vanity-tag-bot/internal/identity"
@@ -74,8 +75,55 @@ func (s *Store) HasActiveRules(ctx context.Context, guildID string) (bool, error
 			SELECT 1 FROM vanity_rules WHERE guild_id=$1 AND enabled=true AND deleted_at IS NULL
 			UNION ALL
 			SELECT 1 FROM guildtag_rules WHERE guild_id=$1 AND enabled=true AND deleted_at IS NULL
+			UNION ALL
+			SELECT 1 FROM identity_role_state WHERE guild_id=$1 AND bot_added_role=true
+			UNION ALL
+			SELECT 1 FROM identity_role_grants WHERE guild_id=$1 AND matched=true
 		)`, guildID).Scan(&found)
 	return found, err
+}
+
+func (s *Store) InvalidateStaleGrants(ctx context.Context, guildID, userID string, source identity.Source, active []identity.GrantScope) error {
+	args := []any{guildID, userID, source}
+	query := `
+		UPDATE identity_role_grants
+		SET matched=false,last_evaluated_at=now(),updated_at=now()
+		WHERE guild_id=$1 AND user_id=$2 AND source_type=$3 AND matched=true`
+	if len(active) > 0 {
+		clauses := make([]string, 0, len(active))
+		for _, scope := range active {
+			base := len(args) + 1
+			clauses = append(clauses, fmt.Sprintf("(rule_id=$%d AND role_id=$%d AND action=$%d)", base, base+1, base+2))
+			args = append(args, scope.RuleID, scope.RoleID, scope.Action)
+		}
+		query += " AND NOT (" + strings.Join(clauses, " OR ") + ")"
+	}
+	_, err := s.pool.Exec(ctx, query, args...)
+	return err
+}
+
+func (s *Store) ManagedRoleIDs(ctx context.Context, guildID, userID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT role_id FROM identity_role_state
+		WHERE guild_id=$1 AND user_id=$2 AND bot_added_role=true
+		UNION
+		SELECT role_id FROM identity_role_grants
+		WHERE guild_id=$1 AND user_id=$2 AND matched=true`, guildID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]string, 0)
+	for rows.Next() {
+		var roleID string
+		if err := rows.Scan(&roleID); err != nil {
+			return nil, err
+		}
+		if roleID != "" {
+			result = append(result, roleID)
+		}
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) RecordGrant(ctx context.Context, grant identity.RoleGrant, audit identity.AuditIntent) (identity.GrantTransition, error) {
@@ -127,6 +175,15 @@ func (s *Store) ActiveRoleSources(ctx context.Context, guildID, userID, roleID s
 	return count, err
 }
 
+func (s *Store) ActiveRoleRemovals(ctx context.Context, guildID, userID, roleID string) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM identity_role_grants
+		WHERE guild_id=$1 AND user_id=$2 AND role_id=$3 AND matched=true AND action=$4`,
+		guildID, userID, roleID, identity.ActionRemoveRole).Scan(&count)
+	return count, err
+}
+
 func (s *Store) GetRoleState(ctx context.Context, guildID, userID, roleID string) (identity.RoleState, error) {
 	var state identity.RoleState
 	err := s.pool.QueryRow(ctx, `
@@ -142,25 +199,35 @@ func (s *Store) GetRoleState(ctx context.Context, guildID, userID, roleID string
 
 func (s *Store) ObserveRolePresence(ctx context.Context, guildID, userID, roleID string, present bool) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO identity_role_state(guild_id,user_id,role_id,last_known_present,created_at,updated_at)
-		VALUES ($1,$2,$3,$4,now(),now())
+		INSERT INTO identity_role_state(guild_id,user_id,role_id,manual_marked,last_known_present,created_at,updated_at)
+		VALUES ($1,$2,$3,$4,$4,now(),now())
 		ON CONFLICT (guild_id,user_id,role_id) DO UPDATE SET
-			manual_marked=identity_role_state.manual_marked OR
-			(identity_role_state.bot_added_role=true AND identity_role_state.last_known_present=false AND $4=true),
+			manual_marked=CASE
+				WHEN $4=true AND (identity_role_state.bot_added_role=false OR identity_role_state.last_known_present=false) THEN true
+				ELSE identity_role_state.manual_marked
+			END,
+			bot_added_role=CASE
+				WHEN $4=true AND identity_role_state.last_known_present=false THEN false
+				ELSE identity_role_state.bot_added_role
+			END,
 			last_known_present=$4, updated_at=now()`, guildID, userID, roleID, present)
 	return err
 }
 
 func (s *Store) MarkBotAdded(ctx context.Context, guildID, userID, roleID string) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO identity_role_state(guild_id,user_id,role_id,bot_added_role,last_known_present,created_at,updated_at)
-		VALUES ($1,$2,$3,true,true,now(),now())
-		ON CONFLICT (guild_id,user_id,role_id) DO UPDATE SET bot_added_role=true,last_known_present=true,updated_at=now()`, guildID, userID, roleID)
+		INSERT INTO identity_role_state(guild_id,user_id,role_id,bot_added_role,manual_marked,last_known_present,created_at,updated_at)
+		VALUES ($1,$2,$3,true,false,true,now(),now())
+		ON CONFLICT (guild_id,user_id,role_id) DO UPDATE SET
+			bot_added_role=true,manual_marked=false,last_known_present=true,updated_at=now()`, guildID, userID, roleID)
 	return err
 }
 
 func (s *Store) MarkBotRemoved(ctx context.Context, guildID, userID, roleID string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE identity_role_state SET last_known_present=false,updated_at=now() WHERE guild_id=$1 AND user_id=$2 AND role_id=$3`, guildID, userID, roleID)
+	_, err := s.pool.Exec(ctx, `
+		UPDATE identity_role_state
+		SET bot_added_role=false,manual_marked=false,last_known_present=false,updated_at=now()
+		WHERE guild_id=$1 AND user_id=$2 AND role_id=$3`, guildID, userID, roleID)
 	return err
 }
 
@@ -210,19 +277,48 @@ func (s *Store) CreateGuildTagRule(ctx context.Context, rule identity.GuildTagRu
 }
 
 func (s *Store) UpdateVanityRule(ctx context.Context, guildID, name string, word *string, source *identity.VanitySource, comparison *identity.Comparison, roleID *string, enabled *bool) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE vanity_rules SET
-			word=COALESCE($3,word), source=COALESCE($4,source), comparison=COALESCE($5,comparison), role_id=COALESCE($6,role_id),
-			enabled=COALESCE($7,enabled), updated_at=now()
-		WHERE guild_id=$1 AND name=$2 AND deleted_at IS NULL`, guildID, name, word, source, comparison, roleID, enabled)
-	return err
+	return s.updateRuleAndInvalidate(ctx, identity.SourceVanity, guildID, name, func(tx pgx.Tx) (string, error) {
+		var ruleID string
+		err := tx.QueryRow(ctx, `
+			UPDATE vanity_rules SET
+				word=COALESCE($3,word), source=COALESCE($4,source), comparison=COALESCE($5,comparison), role_id=COALESCE($6,role_id),
+				enabled=COALESCE($7,enabled), updated_at=now()
+			WHERE guild_id=$1 AND name=$2 AND deleted_at IS NULL
+			RETURNING id`, guildID, name, word, source, comparison, roleID, enabled).Scan(&ruleID)
+		return ruleID, err
+	})
 }
 
 func (s *Store) UpdateGuildTagRule(ctx context.Context, guildID, name string, condition *identity.GuildTagCondition, value *string, roleID *string, enabled *bool) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE guildtag_rules SET condition=COALESCE($3,condition), value=COALESCE($4,value), role_id=COALESCE($5,role_id), enabled=COALESCE($6,enabled), updated_at=now()
-		WHERE guild_id=$1 AND name=$2 AND deleted_at IS NULL`, guildID, name, condition, value, roleID, enabled)
-	return err
+	return s.updateRuleAndInvalidate(ctx, identity.SourceGuildTag, guildID, name, func(tx pgx.Tx) (string, error) {
+		var ruleID string
+		err := tx.QueryRow(ctx, `
+			UPDATE guildtag_rules SET condition=COALESCE($3,condition), value=COALESCE($4,value), role_id=COALESCE($5,role_id), enabled=COALESCE($6,enabled), updated_at=now()
+			WHERE guild_id=$1 AND name=$2 AND deleted_at IS NULL
+			RETURNING id`, guildID, name, condition, value, roleID, enabled).Scan(&ruleID)
+		return ruleID, err
+	})
+}
+
+func (s *Store) updateRuleAndInvalidate(ctx context.Context, source identity.Source, guildID, name string, update func(pgx.Tx) (string, error)) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	ruleID, err := update(tx)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%s rule %q not found", source, name)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE identity_role_grants SET matched=false,last_evaluated_at=now(),updated_at=now()
+		WHERE guild_id=$1 AND rule_id=$2 AND source_type=$3 AND matched=true`, guildID, ruleID, source); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) ResetGuild(ctx context.Context, guildID string) error {
@@ -231,7 +327,45 @@ func (s *Store) ResetGuild(ctx context.Context, guildID string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Rules are deleted by the guild_configs cascade, but grants intentionally
+	// have no foreign key so audit/recovery history survives. Mark every live
+	// grant inactive in the same transaction before removing configuration.
+	if _, err := tx.Exec(ctx, `
+		UPDATE identity_role_grants
+		SET matched=false,last_evaluated_at=now(),updated_at=now()
+		WHERE guild_id=$1 AND matched=true`, guildID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM guild_configs WHERE guild_id=$1`, guildID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) DeleteRuleByName(ctx context.Context, source identity.Source, guildID, name string) error {
+	table := "vanity_rules"
+	if source == identity.SourceGuildTag {
+		table = "guildtag_rules"
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var ruleID string
+	err = tx.QueryRow(ctx, fmt.Sprintf(`
+		UPDATE %s SET enabled=false,deleted_at=now(),updated_at=now()
+		WHERE guild_id=$1 AND name=$2 AND deleted_at IS NULL
+		RETURNING id`, table), guildID, name).Scan(&ruleID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%s rule %q not found", source, name)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE identity_role_grants SET matched=false,last_evaluated_at=now(),updated_at=now()
+		WHERE guild_id=$1 AND rule_id=$2 AND source_type=$3 AND matched=true`, guildID, ruleID, source); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -242,8 +376,24 @@ func (s *Store) DeleteRule(ctx context.Context, source identity.Source, guildID,
 	if source == identity.SourceGuildTag {
 		table = "guildtag_rules"
 	}
-	_, err := s.pool.Exec(ctx, fmt.Sprintf("UPDATE %s SET enabled=false,deleted_at=now(),updated_at=now() WHERE guild_id=$1 AND id=$2", table), guildID, ruleID)
-	return err
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := tx.Exec(ctx, fmt.Sprintf("UPDATE %s SET enabled=false,deleted_at=now(),updated_at=now() WHERE guild_id=$1 AND id=$2 AND deleted_at IS NULL", table), guildID, ruleID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("%s rule %q not found", source, ruleID)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE identity_role_grants SET matched=false,last_evaluated_at=now(),updated_at=now()
+		WHERE guild_id=$1 AND rule_id=$2 AND source_type=$3 AND matched=true`, guildID, ruleID, source); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 type LogConfig struct {

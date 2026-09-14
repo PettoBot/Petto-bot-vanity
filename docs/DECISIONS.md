@@ -20,11 +20,11 @@ No public prefix parser is required. Internal jobs and buttons use private custo
 
 Vanity rules support `custom_status` for the user's Discord Custom Status text, plus the compatible profile sources `username`, `global_name`, `guild_nickname`, and the resolved display name. Custom Status evaluation requires the privileged `GUILD_PRESENCES` intent and reacts to `PRESENCE_UPDATE`; it does not poll Discord or consume the Server Tag API quota.
 
-Guild Tag rules use the user's `primary_guild` data: `identity_guild_id`, nullable `identity_enabled`, `tag`, and `badge`. The implementation never treats arbitrary nickname text as a Server Tag.
+Guild Tag rules use the user's `primary_guild` data: `identity_guild_id`, nullable `identity_enabled`, `tag`, and `badge`. The implementation never treats arbitrary nickname text as a Server Tag. If Discord omits `primary_guild`, the source is unknown rather than an empty identity. Negative conditions (`is_not_guild_id`, `tag_not_equals`, and `identity_disabled`) require a real comparable value and do not match missing data.
 
 ## Shared role ownership
 
-The role engine stores grants per rule, not only per role. A role is removable only when every active add grant for that role is gone and the bot previously recorded that it added the role. A role that was already present remains untouched. This prevents a Vanity rule from removing a role that is still justified by a Guild Tag rule.
+The role engine stores grants per rule, role, source, and action. Editing, disabling, or deleting a rule invalidates grants that no longer match that exact scope, including legacy grants left behind by an edited rule ID. A matching `remove_role` has priority over matching add grants for the same role. Physical removal is still allowed only when the ownership ledger says the bot added the role and it has not been manually re-added, so administrator/member roles are preserved. Reconciliation also revisits bot-managed roles even when the original rule no longer exists.
 
 ## Discord API compatibility
 
@@ -34,11 +34,11 @@ The bot sends an explicit `status: online` presence with its custom status and i
 
 ## Synchronization limits
 
-`GUILD_MEMBER_ADD` and `GUILD_MEMBER_UPDATE` evaluate one member. `USER_UPDATE` evaluates only cached memberships in guilds the session knows about. A periodic reconciler is disabled by default and, when enabled, remains bounded by interval, concurrency, and maximum members. `/identity sync`, `/vanity sync`, and `/guildtag sync` are the explicit recovery path for Server Tag changes that do not arrive as a reliable member event.
+`GUILD_MEMBER_ADD` and `GUILD_MEMBER_UPDATE` evaluate one member. `USER_UPDATE` evaluates only cached memberships in guilds the session knows about. Manual and periodic synchronization fetch guild members in Discord pages of at most 1,000, with a hard safety cap of 10,000 members per guild plus the configured maximum, per-page timeouts, serialized guild work, bounded worker concurrency, and Discord REST rate-limit retries. `/identity sync`, `/vanity sync`, and `/guildtag sync` remain the explicit recovery path for Server Tag changes that do not arrive as a reliable member event.
 
 ## Profile assets
 
-Avatar and banner URLs must be HTTPS and match `ASSET_ALLOWED_HOSTS`, except for Discord CDN attachment URLs from `/set avatar` and `/set banner`. DNS resolution rejects local/private/metadata targets, downloads are bounded, and MIME/dimensions are decoded before a data URI is sent to Discord. On a failed Discord update the prior database references remain intact while only sync status/error is updated.
+Avatar and banner URLs must be HTTPS and match `ASSET_ALLOWED_HOSTS`; Discord CDN/media hosts used by attachment options are a built-in trusted allowlist. DNS resolution rejects local/private/metadata targets, redirects are revalidated, and the dialer refuses private resolved addresses. Downloads are bounded and the actual bytes—not the HTTP `Content-Type` header—determine whether the payload is PNG, JPEG, or GIF and which MIME is used in the Discord data URI. Unsupported bytes are rejected. On a failed Discord update the prior database references remain intact while only sync status/error is updated.
 
 ## Storage boundary
 

@@ -113,7 +113,7 @@ func (b *Bot) handleSet(event *discordgo.InteractionCreate, data discordgo.Appli
 			current.Nickname = &value
 		}
 		if err := b.updateProfile(ctx, guildID, profile.MemberUpdate{Nickname: &value}, current); err != nil {
-			respond(event, "Discord rejected the nickname; the previous profile was preserved.", true)
+			respond(event, profileUpdateError("Discord rejected the nickname; the previous profile was preserved.", err), true)
 			return
 		}
 		respond(event, "Nickname synchronized for this server.", true)
@@ -127,7 +127,7 @@ func (b *Bot) handleSet(event *discordgo.InteractionCreate, data discordgo.Appli
 				current.BannerRef = nil
 			}
 			if err := b.updateProfile(ctx, guildID, profileAssetUpdate(kind, value), current); err != nil {
-				respond(event, "Discord rejected the reset; the previous profile was preserved.", true)
+				respond(event, profileUpdateError("Discord rejected the reset; the previous profile was preserved.", err), true)
 				return
 			}
 			respond(event, kind+" reset to the global bot profile.", true)
@@ -146,7 +146,7 @@ func (b *Bot) handleSet(event *discordgo.InteractionCreate, data discordgo.Appli
 			return
 		}
 		if err := b.updateProfileAsset(ctx, guildID, kind, urlValue, current); err != nil {
-			respond(event, "Asset rejected or Discord update failed; the previous profile was preserved.", true)
+			respond(event, profileUpdateError("Asset rejected or Discord update failed; the previous profile was preserved.", err), true)
 			return
 		}
 		respond(event, kind+" synchronized for this server.", true)
@@ -163,7 +163,7 @@ func (b *Bot) handleSet(event *discordgo.InteractionCreate, data discordgo.Appli
 			current.Bio = &value
 		}
 		if err := b.updateProfile(ctx, guildID, profile.MemberUpdate{Bio: &value}, current); err != nil {
-			respond(event, "Discord rejected the bio; the previous profile was preserved.", true)
+			respond(event, profileUpdateError("Discord rejected the bio; the previous profile was preserved.", err), true)
 			return
 		}
 		respond(event, "Bio synchronized for this server.", true)
@@ -171,7 +171,7 @@ func (b *Bot) handleSet(event *discordgo.InteractionCreate, data discordgo.Appli
 		current.Nickname, current.AvatarRef, current.BannerRef, current.Bio = nil, nil, nil, nil
 		empty := ""
 		if err := b.updateProfile(ctx, guildID, profile.MemberUpdate{Nickname: &empty, Avatar: &empty, Banner: &empty, Bio: &empty}, current); err != nil {
-			respond(event, "Discord rejected the reset; the previous profile was preserved.", true)
+			respond(event, profileUpdateError("Discord rejected the reset; the previous profile was preserved.", err), true)
 			return
 		}
 		respond(event, "Profile reset to the global bot profile for this server.", true)
@@ -238,7 +238,8 @@ func (b *Bot) handleConfig(event *discordgo.InteractionCreate, data discordgo.Ap
 			respond(event, err.Error(), true)
 			return
 		}
-		respond(event, "Server configuration reset. Discord roles were not modified; the role ledger is retained only by PostgreSQL audit history.", true)
+		b.queueCurrentMemberEvaluation(event)
+		respond(event, "Server configuration reset. Active grants were invalidated and your member was queued for safe role reconciliation; audit history is retained.", true)
 	default:
 		respond(event, "Choose a valid configuration action.", true)
 	}
@@ -269,7 +270,8 @@ func (b *Bot) handleVanity(event *discordgo.InteractionCreate, data discordgo.Ap
 			respond(event, "Could not create Vanity rule: "+err.Error(), true)
 			return
 		}
-		respond(event, fmt.Sprintf("Vanity rule created. It checks **%s** with **%s** `%s` and will **%s** <@&%s>. Existing members can be checked with `/vanity sync`.", vanitySourceLabel(rule.Source), comparisonLabel(rule.Comparison), rule.Word, strings.ToLower(roleActionLabel(rule.Action)), rule.RoleID), true)
+		b.queueCurrentMemberEvaluation(event)
+		respond(event, fmt.Sprintf("Vanity rule created. It checks **%s** with **%s** `%s` and will **%s** <@&%s>. Your member was queued for an immediate check; use `/vanity sync` for other members.", vanitySourceLabel(rule.Source), comparisonLabel(rule.Comparison), rule.Word, strings.ToLower(roleActionLabel(rule.Action)), rule.RoleID), true)
 	case "edit":
 		name := optionString(options, "name")
 		var word *string
@@ -301,25 +303,16 @@ func (b *Bot) handleVanity(event *discordgo.InteractionCreate, data discordgo.Ap
 			respond(event, err.Error(), true)
 			return
 		}
-		respond(event, "Vanity rule updated.", true)
+		b.queueCurrentMemberEvaluation(event)
+		respond(event, "Vanity rule updated. Previous grants were invalidated and your member was queued for an immediate check.", true)
 	case "remove":
 		name := optionString(options, "name")
-		rules, err := b.store.ListVanityRules(ctx, guildID)
-		if err != nil {
+		if err := b.store.DeleteRuleByName(ctx, identity.SourceVanity, guildID, name); err != nil {
 			respond(event, err.Error(), true)
 			return
 		}
-		for _, rule := range rules {
-			if rule.Name == name {
-				if err := b.store.DeleteRule(ctx, identity.SourceVanity, guildID, rule.ID); err != nil {
-					respond(event, err.Error(), true)
-					return
-				}
-				respond(event, "Vanity rule removed.", true)
-				return
-			}
-		}
-		respond(event, "Vanity rule not found.", true)
+		b.queueCurrentMemberEvaluation(event)
+		respond(event, "Vanity rule removed. Previous grants were invalidated and your member was queued for an immediate check.", true)
 	case "list":
 		rules, err := b.store.ListVanityRules(ctx, guildID)
 		if err != nil {
@@ -392,26 +385,15 @@ func (b *Bot) handleGuildTag(event *discordgo.InteractionCreate, data discordgo.
 			return
 		}
 		b.queueCurrentMemberEvaluation(event)
-		respond(event, "Server Tag rule updated. Your member was queued for an immediate primary_guild check.", true)
+		respond(event, "Server Tag rule updated. Previous grants were invalidated and your member was queued for an immediate primary_guild check.", true)
 	case "remove":
 		name := optionString(options, "name")
-		rules, err := b.store.ListGuildTagRules(ctx, guildID)
-		if err != nil {
+		if err := b.store.DeleteRuleByName(ctx, identity.SourceGuildTag, guildID, name); err != nil {
 			respond(event, err.Error(), true)
 			return
 		}
-		for _, rule := range rules {
-			if rule.Name == name {
-				if err := b.store.DeleteRule(ctx, identity.SourceGuildTag, guildID, rule.ID); err != nil {
-					respond(event, err.Error(), true)
-					return
-				}
-				b.queueCurrentMemberEvaluation(event)
-				respond(event, "Server Tag rule removed. Your member was queued so any role no longer justified can be reconciled safely.", true)
-				return
-			}
-		}
-		respond(event, "Server Tag rule not found.", true)
+		b.queueCurrentMemberEvaluation(event)
+		respond(event, "Server Tag rule removed. Previous grants were invalidated and your member was queued so any role no longer justified can be reconciled safely.", true)
 	case "list":
 		rules, err := b.store.ListGuildTagRules(ctx, guildID)
 		if err != nil {
@@ -869,7 +851,7 @@ func (b *Bot) handleMemberEvaluation(event *discordgo.InteractionCreate, source 
 	option := commandOptions["user"]
 	if !dryRun && option == nil {
 		go b.syncGuildMembers(event.GuildID, source)
-		respond(event, fmt.Sprintf("Manual bounded %s sync started. It will inspect up to %d members; this does not run automatically on restart.", notificationSourceName(source), b.config.ReconcileMaxUsers), true)
+		respond(event, fmt.Sprintf("Manual bounded %s sync started. It will inspect up to %d members; this does not run automatically on restart.", notificationSourceName(source), boundedMemberLimit(b.config.ReconcileMaxUsers)), true)
 		return
 	}
 	userID := event.Member.User.ID
@@ -941,16 +923,8 @@ func (b *Bot) handleMemberEvaluation(event *discordgo.InteractionCreate, source 
 }
 
 func (b *Bot) syncGuildMembers(guildID string, source identity.Source) {
-	ctx, cancel := b.operationContext()
-	defer cancel()
-	limit := b.config.ReconcileMaxUsers
-	if limit < 1 {
-		limit = 1
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
-	members, err := b.session.GuildMembers(guildID, "", limit, discordgo.WithContext(ctx))
+	limit := boundedMemberLimit(b.config.ReconcileMaxUsers)
+	members, err := b.fetchGuildMembersPaginated(context.Background(), guildID, limit)
 	if err != nil {
 		b.logger.Error("manual guild sync member fetch failed", "guild_id", guildID, "source", source, "error", err)
 		return
@@ -1053,29 +1027,31 @@ func (b *Bot) handleComponent(event *discordgo.InteractionCreate) {
 
 func (b *Bot) handleHelpComponent(event *discordgo.InteractionCreate, id string, data discordgo.MessageComponentInteractionData) {
 	parts := strings.Split(id, ":")
-	if len(parts) < 3 || !b.helpAllowed(event.Member.User.ID) {
+	if len(parts) < 3 {
+		respond(event, "This help panel is invalid or has expired. Run `/cmds` again.", true)
+		return
+	}
+	sessionID := parts[2]
+	actor := actorID(event)
+	session, allowed := b.helpAllowed(sessionID, actor)
+	if !allowed {
 		respond(event, "This help panel belongs to another user or has expired.", true)
 		return
 	}
-	owner := parts[2]
-	if owner != event.Member.User.ID {
-		respond(event, "This help panel belongs to another user.", true)
-		return
-	}
 	if parts[1] == "close" {
-		content := "Help panel closed."
-		components := []discordgo.MessageComponent{}
-		_, _ = b.session.InteractionResponseEdit(event.Interaction, &discordgo.WebhookEdit{Content: &content, Components: &components})
+		b.closeHelpSession(sessionID)
+		response := &discordgo.InteractionResponseData{Content: "Help panel closed. Run `/cmds` whenever you need it again.", Components: []discordgo.MessageComponent{}, Embeds: []*discordgo.MessageEmbed{}}
+		_ = interactionRespond(b.session, event, response, discordgo.InteractionResponseUpdateMessage)
 		return
 	}
-	category := 0
+	category := session.Category
 	if parts[1] == "page" && len(parts) > 3 {
 		category, _ = strconv.Atoi(parts[3])
 	}
 	if parts[1] == "select" && len(data.Values) > 0 {
 		category, _ = strconv.Atoi(data.Values[0])
 	}
-	response, err := b.helpPanel(owner, "", category)
+	response, err := b.helpPanelForSession(sessionID, category)
 	if err != nil {
 		respond(event, err.Error(), true)
 		return
@@ -1434,6 +1410,23 @@ func (b *Bot) loadPrimaryGuild(ctx context.Context, userID string) (*identity.Pr
 		return nil, nil
 	}
 	return &identity.PrimaryGuild{IdentityGuildID: payload.PrimaryGuild.IdentityGuildID, IdentityEnabled: payload.PrimaryGuild.IdentityEnabled, Tag: payload.PrimaryGuild.Tag, Badge: payload.PrimaryGuild.Badge}, nil
+}
+
+func profileUpdateError(prefix string, err error) string {
+	if err == nil {
+		return prefix
+	}
+	reason := strings.Join(strings.Fields(err.Error()), " ")
+	reason = strings.ReplaceAll(reason, "`", "'")
+	const maxRunes = 300
+	runes := []rune(reason)
+	if len(runes) > maxRunes {
+		reason = string(runes[:maxRunes]) + "…"
+	}
+	if reason == "" {
+		return prefix
+	}
+	return prefix + " Reason: `" + reason + "`"
 }
 
 func respond(event *discordgo.InteractionCreate, content string, ephemeral bool) {

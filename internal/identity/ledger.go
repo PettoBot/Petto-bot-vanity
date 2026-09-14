@@ -32,6 +32,49 @@ func (m *MemoryLedger) ListGuildTagRules(context.Context, string) ([]GuildTagRul
 	return nil, nil
 }
 
+func (m *MemoryLedger) InvalidateStaleGrants(_ context.Context, guildID, userID string, source Source, active []GrantScope) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key, grant := range m.grants {
+		if grant.GuildID != guildID || grant.UserID != userID || grant.SourceType != source || !grant.Matched {
+			continue
+		}
+		valid := false
+		for _, scope := range active {
+			if grant.RuleID == scope.RuleID && grant.RoleID == scope.RoleID && grant.Action == scope.Action {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			grant.Matched = false
+			m.grants[key] = grant
+		}
+	}
+	return nil
+}
+
+func (m *MemoryLedger) ManagedRoleIDs(_ context.Context, guildID, userID string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	roles := make(map[string]struct{})
+	for _, state := range m.states {
+		if state.GuildID == guildID && state.UserID == userID && state.BotAddedRole && state.RoleID != "" {
+			roles[state.RoleID] = struct{}{}
+		}
+	}
+	for _, grant := range m.grants {
+		if grant.GuildID == guildID && grant.UserID == userID && grant.Matched && grant.RoleID != "" {
+			roles[grant.RoleID] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(roles))
+	for roleID := range roles {
+		result = append(result, roleID)
+	}
+	return result, nil
+}
+
 func (m *MemoryLedger) RecordGrant(_ context.Context, grant RoleGrant, audit AuditIntent) (GrantTransition, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -59,6 +102,18 @@ func (m *MemoryLedger) ActiveRoleSources(_ context.Context, guildID, userID, rol
 	return count, nil
 }
 
+func (m *MemoryLedger) ActiveRoleRemovals(_ context.Context, guildID, userID, roleID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for _, grant := range m.grants {
+		if grant.GuildID == guildID && grant.UserID == userID && grant.RoleID == roleID && grant.Matched && grant.Action == ActionRemoveRole {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (m *MemoryLedger) GetRoleState(_ context.Context, guildID, userID, roleID string) (RoleState, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -72,8 +127,12 @@ func (m *MemoryLedger) ObserveRolePresence(_ context.Context, guildID, userID, r
 	defer m.mu.Unlock()
 	key := stateKey(guildID, userID, roleID)
 	state := m.states[key]
-	if state.BotAddedRole && !state.LastKnownPresent && present {
+	if present && (!state.BotAddedRole || !state.LastKnownPresent) {
+		// A present role that Petto does not currently own is manual. The
+		// lastKnownPresent=false case also repairs ownership left behind by
+		// older versions whose MarkBotRemoved did not clear bot_added_role.
 		state.ManualMarked = true
+		state.BotAddedRole = false
 	}
 	state.GuildID, state.UserID, state.RoleID = guildID, userID, roleID
 	state.LastKnownPresent = present
@@ -88,6 +147,7 @@ func (m *MemoryLedger) MarkBotAdded(_ context.Context, guildID, userID, roleID s
 	state := m.states[key]
 	state.GuildID, state.UserID, state.RoleID = guildID, userID, roleID
 	state.BotAddedRole = true
+	state.ManualMarked = false
 	state.LastKnownPresent = true
 	m.states[key] = state
 	return nil
@@ -99,6 +159,8 @@ func (m *MemoryLedger) MarkBotRemoved(_ context.Context, guildID, userID, roleID
 	key := stateKey(guildID, userID, roleID)
 	state := m.states[key]
 	state.GuildID, state.UserID, state.RoleID = guildID, userID, roleID
+	state.BotAddedRole = false
+	state.ManualMarked = false
 	state.LastKnownPresent = false
 	m.states[key] = state
 	return nil

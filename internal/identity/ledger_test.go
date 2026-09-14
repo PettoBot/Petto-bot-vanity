@@ -176,3 +176,142 @@ func TestBotMembersAreIgnored(t *testing.T) {
 		t.Fatalf("bot member must be ignored, got results=%#v added=%#v notifications=%#v", results, roles.added, notifier.events)
 	}
 }
+
+func TestRemoveRuleWinsOverMatchingAddRule(t *testing.T) {
+	ledger := NewMemoryLedger()
+	roles := &fakeRoles{}
+	engine := Engine{Store: ledger, Roles: roles}
+	add := VanityRule{ID: "add", GuildID: "guild", Name: "add", Word: "rep", Source: VanityUsername, Comparison: ComparisonContains, RoleID: "role", Action: ActionAddRole, Enabled: true}
+	remove := VanityRule{ID: "remove", GuildID: "guild", Name: "remove", Word: "rep", Source: VanityUsername, Comparison: ComparisonContains, RoleID: "role", Action: ActionRemoveRole, Enabled: true}
+	member := MemberIdentity{GuildID: "guild", UserID: "user", Username: "rep", RoleIDs: map[string]struct{}{}}
+
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{add}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.added) != 1 {
+		t.Fatalf("expected initial bot-owned add, got %#v", roles.added)
+	}
+	member.RoleIDs["role"] = struct{}{}
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{add, remove}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.removed) != 1 {
+		t.Fatalf("matching remove_role must override add_role, got removals %#v", roles.removed)
+	}
+}
+
+func TestRemoveRuleNeverRemovesManualRole(t *testing.T) {
+	ledger := NewMemoryLedger()
+	roles := &fakeRoles{}
+	engine := Engine{Store: ledger, Roles: roles}
+	remove := VanityRule{ID: "remove", GuildID: "guild", Name: "remove", Word: "rep", Source: VanityUsername, Comparison: ComparisonContains, RoleID: "role", Action: ActionRemoveRole, Enabled: true}
+	member := MemberIdentity{GuildID: "guild", UserID: "manual", Username: "rep", RoleIDs: map[string]struct{}{"role": {}}}
+
+	results, err := engine.Evaluate(context.Background(), member, []VanityRule{remove}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.removed) != 0 {
+		t.Fatalf("manual role was removed by remove_role: %#v", roles.removed)
+	}
+	if len(results) != 1 || !results[0].ManualMarked {
+		t.Fatalf("manual ownership was not preserved: %#v", results)
+	}
+}
+
+func TestDeletedRuleInvalidatesGrantAndRemovesBotOwnedRole(t *testing.T) {
+	ledger := NewMemoryLedger()
+	roles := &fakeRoles{}
+	engine := Engine{Store: ledger, Roles: roles}
+	add := VanityRule{ID: "old", GuildID: "guild", Name: "old", Word: "rep", Source: VanityUsername, Comparison: ComparisonContains, RoleID: "role", Action: ActionAddRole, Enabled: true}
+	member := MemberIdentity{GuildID: "guild", UserID: "user", Username: "rep", RoleIDs: map[string]struct{}{}}
+
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{add}, nil); err != nil {
+		t.Fatal(err)
+	}
+	member.RoleIDs["role"] = struct{}{}
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.removed) != 1 {
+		t.Fatalf("stale bot-owned role was not removed after rule deletion: %#v", roles.removed)
+	}
+	state, err := ledger.GetRoleState(context.Background(), "guild", "user", "role")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.BotAddedRole {
+		t.Fatal("bot ownership must be cleared after successful removal")
+	}
+}
+
+func TestEditedRuleInvalidatesOldRoleScope(t *testing.T) {
+	ledger := NewMemoryLedger()
+	roles := &fakeRoles{}
+	engine := Engine{Store: ledger, Roles: roles}
+	oldRule := VanityRule{ID: "same-id", GuildID: "guild", Name: "rule", Word: "rep", Source: VanityUsername, Comparison: ComparisonContains, RoleID: "old-role", Action: ActionAddRole, Enabled: true}
+	member := MemberIdentity{GuildID: "guild", UserID: "user", Username: "rep", RoleIDs: map[string]struct{}{}}
+
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{oldRule}, nil); err != nil {
+		t.Fatal(err)
+	}
+	member.RoleIDs["old-role"] = struct{}{}
+	edited := oldRule
+	edited.RoleID = "new-role"
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{edited}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.removed) != 1 || roles.removed[0] != "old-role" {
+		t.Fatalf("edited rule left old role managed: %#v", roles.removed)
+	}
+	if len(roles.added) != 2 || roles.added[1] != "new-role" {
+		t.Fatalf("edited rule did not add new role: %#v", roles.added)
+	}
+}
+
+func TestDisabledRuleInvalidatesExistingGrant(t *testing.T) {
+	ledger := NewMemoryLedger()
+	roles := &fakeRoles{}
+	engine := Engine{Store: ledger, Roles: roles}
+	rule := VanityRule{ID: "rule", GuildID: "guild", Name: "rule", Word: "rep", Source: VanityUsername, Comparison: ComparisonContains, RoleID: "role", Action: ActionAddRole, Enabled: true}
+	member := MemberIdentity{GuildID: "guild", UserID: "user", Username: "rep", RoleIDs: map[string]struct{}{}}
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{rule}, nil); err != nil {
+		t.Fatal(err)
+	}
+	member.RoleIDs["role"] = struct{}{}
+	rule.Enabled = false
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{rule}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.removed) != 1 {
+		t.Fatalf("disabled rule left its bot-owned role behind: %#v", roles.removed)
+	}
+}
+
+func TestLegacyRemovedOwnershipDoesNotConsumeManualReAdd(t *testing.T) {
+	ledger := NewMemoryLedger()
+	roles := &fakeRoles{}
+	engine := Engine{Store: ledger, Roles: roles}
+
+	ledger.mu.Lock()
+	ledger.states[stateKey("guild", "user", "role")] = RoleState{
+		GuildID: "guild", UserID: "user", RoleID: "role",
+		BotAddedRole: true, LastKnownPresent: false,
+	}
+	ledger.mu.Unlock()
+
+	member := MemberIdentity{GuildID: "guild", UserID: "user", RoleIDs: map[string]struct{}{"role": {}}}
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{}, []GuildTagRule{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.removed) != 0 {
+		t.Fatalf("legacy ownership caused a manual re-add to be removed: %#v", roles.removed)
+	}
+	state, err := ledger.GetRoleState(context.Background(), "guild", "user", "role")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.BotAddedRole || !state.ManualMarked {
+		t.Fatalf("legacy ownership was not repaired as manual: %#v", state)
+	}
+}

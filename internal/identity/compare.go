@@ -102,27 +102,28 @@ func MatchVanity(rule VanityRule, member MemberIdentity) (bool, error) {
 }
 
 func MatchGuildTag(rule GuildTagRule, primary *PrimaryGuild) bool {
-	identityGuildID := ""
-	identityEnabled := false
-	tag := ""
-	if primary != nil {
-		identityGuildID = primary.IdentityGuildID
-		identityEnabled = primary.IdentityEnabled != nil && *primary.IdentityEnabled
-		tag = primary.Tag
+	// A missing primary_guild object, or an omitted field inside it, means
+	// "unknown" rather than an empty/false value. In particular, negative
+	// conditions must never turn absent Discord data into a positive match.
+	if primary == nil {
+		return false
 	}
+
+	identityGuildID := strings.TrimSpace(primary.IdentityGuildID)
+	tag := strings.TrimSpace(primary.Tag)
 	switch rule.Condition {
 	case ConditionIsGuildID:
-		return identityGuildID == rule.Value
+		return identityGuildID != "" && identityGuildID == rule.Value
 	case ConditionIsNotGuildID:
-		return identityGuildID != rule.Value
+		return identityGuildID != "" && identityGuildID != rule.Value
 	case ConditionIdentityEnabled:
-		return identityEnabled
+		return primary.IdentityEnabled != nil && *primary.IdentityEnabled
 	case ConditionIdentityDisabled:
-		return !identityEnabled
+		return primary.IdentityEnabled != nil && !*primary.IdentityEnabled
 	case ConditionTagEquals:
-		return strings.EqualFold(tag, rule.Value)
+		return tag != "" && strings.EqualFold(tag, rule.Value)
 	case ConditionTagNotEquals:
-		return !strings.EqualFold(tag, rule.Value)
+		return tag != "" && !strings.EqualFold(tag, rule.Value)
 	default:
 		return false
 	}

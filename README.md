@@ -10,10 +10,17 @@ Este proyecto no comparte código de ejecución, base de datos ni secretos con P
 - Sólo comandos slash y componentes de Discord.
 - Migración PostgreSQL idempotente y repositorios con consultas parametrizadas y contextos.
 - Reglas Vanity y Guild Tag con evaluación dry-run, sincronización manual y eventos de miembro y presencia.
-- Ledger de grants por regla: Vanity y Guild Tag pueden compartir un rol sin removerlo incorrectamente.
+- Ledger de grants por regla y rol: los grants viejos se invalidan al editar, desactivar o eliminar una regla; `remove_role` tiene prioridad cuando coincide, sin retirar roles que Petto no haya añadido.
 - Logs en embeds, auditoría deduplicada y plantillas de embeds con variables seguras.
-- Perfil por servidor del bot mediante `/set`: nickname, avatar, banner y bio, con URL o upload de Discord, validación de activos y fallback global.
-- Health checks `/healthz` y `/readyz`, cierre ordenado y reconciliación periódica desactivada por defecto.
+- Perfil por servidor del bot mediante `/set`: nickname, avatar, banner y bio, con URL o upload de Discord, detección del formato real de PNG/JPEG/GIF y protección SSRF.
+- `/cmds` privado y navegable por categorías, con búsqueda, sintaxis, ejemplos, permisos, cierre y expiración de sesión.
+- Health checks `/healthz` y `/readyz`, cierre ordenado y reconciliación periódica desactivada por defecto; los barridos de miembros usan paginación limitada.
+
+## Reconciliación de roles
+
+Petto conserva propiedad explícita de los roles que él mismo añadió. Al editar, desactivar o eliminar una regla, sus grants anteriores dejan de justificar el rol y el miembro vuelve a evaluarse. Si una regla `remove_role` coincide para el mismo rol, gana frente a cualquier `add_role`, pero el bot sólo ejecuta la eliminación cuando su ledger confirma que el rol fue añadido por Petto. Los roles manuales se preservan.
+
+Si Discord omite `primary_guild`, el valor se considera desconocido. Una ausencia no satisface automáticamente condiciones negativas como `is_not_guild_id`, `tag_not_equals` o `identity_disabled`.
 
 ## Desarrollo
 

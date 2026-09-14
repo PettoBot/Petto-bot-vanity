@@ -37,6 +37,14 @@ type Fetcher struct {
 }
 
 func NewFetcher(maxBytes, maxPixels int64, allowedHosts map[string]struct{}) *Fetcher {
+	normalizedHosts := make(map[string]struct{}, len(allowedHosts))
+	for host := range allowedHosts {
+		host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+		if host != "" {
+			normalizedHosts[host] = struct{}{}
+		}
+	}
+	allowedHosts = normalizedHosts
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -92,10 +100,6 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (Asset, error) {
 	if response.ContentLength > f.MaxBytes {
 		return Asset{}, fmt.Errorf("profile asset exceeds %d bytes", f.MaxBytes)
 	}
-	mime := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
-	if !allowedMIME(mime) {
-		return Asset{}, fmt.Errorf("unsupported profile asset MIME %q", mime)
-	}
 	limited := io.LimitReader(response.Body, f.MaxBytes+1)
 	data, err := io.ReadAll(limited)
 	if err != nil {
@@ -104,18 +108,35 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (Asset, error) {
 	if int64(len(data)) > f.MaxBytes {
 		return Asset{}, fmt.Errorf("profile asset exceeds %d bytes", f.MaxBytes)
 	}
+	return decodeAsset(parsed.String(), data, f.MaxPixels)
+}
+
+func decodeAsset(reference string, data []byte, maxPixels int64) (Asset, error) {
+	if len(data) == 0 {
+		return Asset{}, fmt.Errorf("profile asset is empty")
+	}
 	config, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return Asset{}, fmt.Errorf("decode profile asset: %w", err)
+		return Asset{}, fmt.Errorf("unsupported profile asset format; use PNG, JPEG, or GIF")
 	}
-	if int64(config.Width)*int64(config.Height) > f.MaxPixels {
-		return Asset{}, fmt.Errorf("profile asset exceeds %d pixels", f.MaxPixels)
+	mime := formatMIME(format)
+	if !allowedMIME(mime) {
+		return Asset{}, fmt.Errorf("unsupported profile asset format %q; use PNG, JPEG, or GIF", format)
 	}
-	if mime == "" || mime == "application/octet-stream" {
-		mime = formatMIME(format)
+	if config.Width <= 0 || config.Height <= 0 {
+		return Asset{}, fmt.Errorf("profile asset has invalid dimensions")
 	}
-	return Asset{Reference: parsed.String(), DataURI: "data:" + mime + ";base64," + encodeBase64(data), MIME: mime,
-		Width: config.Width, Height: config.Height, Size: int64(len(data))}, nil
+	if maxPixels > 0 && int64(config.Width) > maxPixels/int64(config.Height) {
+		return Asset{}, fmt.Errorf("profile asset exceeds %d pixels", maxPixels)
+	}
+	return Asset{
+		Reference: reference,
+		DataURI:   "data:" + mime + ";base64," + encodeBase64(data),
+		MIME:      mime,
+		Width:     config.Width,
+		Height:    config.Height,
+		Size:      int64(len(data)),
+	}, nil
 }
 
 func ValidateURL(parsed *url.URL, allowedHosts map[string]struct{}) error {
@@ -219,8 +240,18 @@ func (s *Service) UpdateAsset(ctx context.Context, guildID, kind, rawURL string,
 }
 
 func isPrivateIP(ip net.IP) bool {
-	privateRanges := []string{"10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "::1/128", "fc00::/7", "fe80::/10"}
-	for _, raw := range privateRanges {
+	if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return true
+	}
+	// IsPrivate deliberately excludes several non-public ranges. Block them as
+	// well so DNS rebinding cannot turn an allowlisted hostname into a local,
+	// benchmarking, documentation, or otherwise non-routable destination.
+	nonPublicRanges := []string{
+		"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24",
+		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4",
+		"2001:db8::/32",
+	}
+	for _, raw := range nonPublicRanges {
 		_, network, _ := net.ParseCIDR(raw)
 		if network.Contains(ip) {
 			return true

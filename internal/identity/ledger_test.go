@@ -315,3 +315,52 @@ func TestLegacyRemovedOwnershipDoesNotConsumeManualReAdd(t *testing.T) {
 		t.Fatalf("legacy ownership was not repaired as manual: %#v", state)
 	}
 }
+
+func TestSkippedGuildTagEvaluationPreservesManagedGrant(t *testing.T) {
+	ledger := NewMemoryLedger()
+	roles := &fakeRoles{}
+	engine := Engine{Store: ledger, Roles: roles}
+	enabled := true
+	tags := []GuildTagRule{{
+		ID:        "tag-1",
+		GuildID:   "guild",
+		Name:      "server-tag",
+		Condition: ConditionIsGuildID,
+		Value:     "source",
+		RoleID:    "role",
+		Action:    ActionAddRole,
+		Enabled:   true,
+	}}
+	member := MemberIdentity{
+		GuildID:      "guild",
+		UserID:       "user",
+		PrimaryGuild: &PrimaryGuild{IdentityGuildID: "source", IdentityEnabled: &enabled},
+		RoleIDs:      map[string]struct{}{},
+	}
+
+	if _, err := engine.Evaluate(context.Background(), member, nil, tags); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.added) != 1 {
+		t.Fatalf("expected role to be added once, got %#v", roles.added)
+	}
+
+	// Simulate a later event where Discord did not return authoritative
+	// primary_guild data. Passing nil tagRules means the Guild Tag source was
+	// intentionally skipped and must not invalidate the previous matched grant.
+	member.PrimaryGuild = nil
+	member.RoleIDs = map[string]struct{}{"role": {}}
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.removed) != 0 {
+		t.Fatalf("unknown primary_guild must not revoke a managed Guild Tag role: %#v", roles.removed)
+	}
+	active, err := ledger.ActiveRoleSources(context.Background(), "guild", "user", "role")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 {
+		t.Fatalf("expected previous Guild Tag grant to remain active, got %d", active)
+	}
+}

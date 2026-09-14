@@ -108,37 +108,56 @@ func (b *Bot) evaluateMember(guildID string, member identity.MemberIdentity) {
 
 func (b *Bot) evaluateMemberForSource(guildID string, member identity.MemberIdentity, source identity.Source) {
 	b.withGuildLock(guildID, func() {
-		ctx, cancel := b.operationContext()
-		defer cancel()
-		if source == identity.SourceGuildTag || source == "" {
-			tagRules, err := b.store.ListGuildTagRules(ctx, guildID)
+		// Each external operation gets its own timeout. In particular, a slow
+		// Discord /users/:id request for primary_guild must never consume the
+		// context later used for PostgreSQL or Vanity evaluation.
+		var vanityRules []identity.VanityRule
+		var tagRules []identity.GuildTagRule
+
+		if source != identity.SourceGuildTag {
+			ctx, cancel := b.operationContext()
+			rules, err := b.store.ListVanityRules(ctx, guildID)
+			cancel()
 			if err != nil {
-				b.logger.Warn("load guild tag rules before member evaluation failed", "guild_id", guildID, "user_id", member.UserID, "error", err)
-			} else if len(tagRules) > 0 && member.PrimaryGuild == nil && member.UserID != "" {
-				primary, loadErr := b.loadPrimaryGuild(ctx, member.UserID)
+				b.logger.Error("load vanity rules before member evaluation failed", "guild_id", guildID, "user_id", member.UserID, "error", err)
+				return
+			}
+			vanityRules = rules
+		}
+
+		if source != identity.SourceVanity {
+			ctx, cancel := b.operationContext()
+			rules, err := b.store.ListGuildTagRules(ctx, guildID)
+			cancel()
+			if err != nil {
+				b.logger.Error("load guild tag rules before member evaluation failed", "guild_id", guildID, "user_id", member.UserID, "error", err)
+				return
+			}
+			tagRules = rules
+
+			if len(tagRules) > 0 && member.PrimaryGuild == nil && member.UserID != "" {
+				primaryCtx, primaryCancel := b.operationContext()
+				primary, loadErr := b.loadPrimaryGuild(primaryCtx, member.UserID)
+				primaryCancel()
 				if loadErr != nil {
-					b.logger.Warn("load member primary_guild failed", "guild_id", guildID, "user_id", member.UserID, "error", loadErr)
+					b.logger.Warn("load member primary_guild failed; skipping guild tag evaluation", "guild_id", guildID, "user_id", member.UserID, "error", loadErr)
+					// nil tells the engine that this source was intentionally not
+					// evaluated. Existing Guild Tag grants remain untouched until
+					// Discord provides authoritative primary_guild data again.
+					tagRules = nil
+				} else if primary == nil {
+					// Discord omitted primary_guild. That means unknown, not
+					// identity_disabled and not a negative comparison match.
+					tagRules = nil
 				} else {
 					member.PrimaryGuild = primary
 				}
 			}
 		}
-		vanityRules, err := b.store.ListVanityRules(ctx, guildID)
-		if err != nil {
-			b.logger.Error("load vanity rules before member evaluation failed", "guild_id", guildID, "user_id", member.UserID, "error", err)
-			return
-		}
-		tagRules, err := b.store.ListGuildTagRules(ctx, guildID)
-		if err != nil {
-			b.logger.Error("load guild tag rules before member evaluation failed", "guild_id", guildID, "user_id", member.UserID, "error", err)
-			return
-		}
-		if source == identity.SourceVanity {
-			tagRules = nil
-		} else if source == identity.SourceGuildTag {
-			vanityRules = nil
-		}
-		if _, err := b.identity.Engine.Evaluate(ctx, member, vanityRules, tagRules); err != nil {
+
+		evalCtx, evalCancel := b.operationContext()
+		defer evalCancel()
+		if _, err := b.identity.Engine.Evaluate(evalCtx, member, vanityRules, tagRules); err != nil {
 			b.logger.Error("evaluate member", "guild_id", guildID, "user_id", member.UserID, "error", err)
 		}
 	})

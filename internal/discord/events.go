@@ -138,7 +138,7 @@ func (b *Bot) evaluateMemberForSource(guildID string, member identity.MemberIden
 
 			if len(tagRules) > 0 && member.PrimaryGuild == nil && member.UserID != "" {
 				primaryCtx, primaryCancel := b.operationContext()
-				primary, loadErr := b.loadPrimaryGuild(primaryCtx, member.UserID)
+				primary, loadErr := b.loadPrimaryGuildForGuild(primaryCtx, guildID, member.UserID)
 				primaryCancel()
 				if loadErr != nil {
 					b.logger.Warn("load member primary_guild failed; skipping guild tag evaluation", "guild_id", guildID, "user_id", member.UserID, "error", loadErr)

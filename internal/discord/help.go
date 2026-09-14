@@ -35,7 +35,7 @@ var helpCategories = []helpCategory{
 	{Name: "Server Tags", Emoji: "🏷️", Summary: "Manage Discord primary guild and visible Server Tag role rules.", Commands: []string{"guildtag"}},
 	{Name: "Logs", Emoji: "📋", Summary: "Petto-style audit cards for role changes and errors.", Commands: []string{"logs"}},
 	{Name: "Embeds", Emoji: "🖼️", Summary: "Create safe reusable notification embeds and previews.", Commands: []string{"embed"}},
-	{Name: "Utility", Emoji: "🔎", Summary: "Private command lookup and bounded synchronization helpers.", Commands: []string{"cmds"}},
+	{Name: "Utility", Emoji: "🔎", Summary: "Command lookup and bounded synchronization helpers.", Commands: []string{"cmds"}},
 }
 
 func (b *Bot) helpPanel(ownerID, query string, category int) (*discordgo.InteractionResponseData, error) {
@@ -61,9 +61,8 @@ func (b *Bot) helpPanel(ownerID, query string, category int) (*discordgo.Interac
 	}
 
 	sessionID, expires := b.createHelpSession(ownerID, category)
-	view.Footer = &discordgo.MessageEmbedFooter{Text: "Private Petto panel · expires " + expires.Format("15:04:05 MST")}
+	view.Footer = &discordgo.MessageEmbedFooter{Text: "Petto help panel · expires " + expires.Format("15:04:05 MST")}
 	return &discordgo.InteractionResponseData{
-		Flags:      discordgo.MessageFlagsEphemeral,
 		Embeds:     []*discordgo.MessageEmbed{view},
 		Components: helpComponents(sessionID, category, b.config.Emojis),
 	}, nil
@@ -82,7 +81,7 @@ func (b *Bot) helpPanelForSession(sessionID string, category int) (*discordgo.In
 		return nil, fmt.Errorf("this help panel has expired; run `/cmds` again")
 	}
 	embed := helpCategoryView(buildHelpCommands(), category, session.Expires)
-	embed.Footer = &discordgo.MessageEmbedFooter{Text: "Private Petto panel · expires " + session.Expires.Format("15:04:05 MST")}
+	embed.Footer = &discordgo.MessageEmbedFooter{Text: "Petto help panel · expires " + session.Expires.Format("15:04:05 MST")}
 	return &discordgo.InteractionResponseData{
 		Embeds:     []*discordgo.MessageEmbed{embed},
 		Components: helpComponents(sessionID, category, b.config.Emojis),

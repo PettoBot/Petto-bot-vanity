@@ -13,7 +13,7 @@ func CommandCatalog() []*discordgo.ApplicationCommand {
 	settingsAdmin := int64(discordgo.PermissionManageGuild)
 	settingsAdminPtr := &settingsAdmin
 	return []*discordgo.ApplicationCommand{
-		{Name: "cmds", Description: "Open the private Vanity Tag Bot help panel", Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionString, Name: "command", Description: "Search for a command", Required: false, Autocomplete: false, MaxLength: 64}}},
+		{Name: "cmds", Description: "Open the Vanity Tag Bot help panel", Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionString, Name: "command", Description: "Search for a command", Required: false, Autocomplete: false, MaxLength: 64}}},
 		{Name: "setup", Description: "Open the guided server setup", DefaultMemberPermissions: adminPtr},
 		{Name: "config", Description: "View or reset this server's setup", DefaultMemberPermissions: adminPtr, Options: configOptions()},
 		{Name: "set", Description: "Customize this server's bot profile", DefaultMemberPermissions: settingsAdminPtr, Options: setOptions()},

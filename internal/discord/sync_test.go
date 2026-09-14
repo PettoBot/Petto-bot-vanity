@@ -50,13 +50,13 @@ func TestSyncPercentIsBounded(t *testing.T) {
 	}
 }
 
-func TestManualSyncStatsUnknownIdentityIsWarning(t *testing.T) {
+func TestManualSyncStatsUnknownIdentityIsSafeNotWarning(t *testing.T) {
 	stats := manualSyncStats{StartedAt: time.Now()}
-	stats.apply(syncMemberResult{unknownIdentity: true, warnings: 1, warning: "primary_guild unknown"})
-	if stats.Processed != 1 || stats.UnknownIdentity != 1 || stats.Warnings != 1 || stats.Errors != 0 {
+	stats.apply(syncMemberResult{unknownIdentity: true})
+	if stats.Processed != 1 || stats.UnknownIdentity != 1 || stats.Warnings != 0 || stats.Errors != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
-	if stage := finalSyncStage(stats); stage != "Completed with warnings" {
+	if stage := finalSyncStage(stats); stage != "Synchronization completed safely" {
 		t.Fatalf("unexpected final stage: %s", stage)
 	}
 }
@@ -65,24 +65,6 @@ func TestSanitizeSyncMessage(t *testing.T) {
 	value := sanitizeSyncMessage("  hello\n`world`  ")
 	if value != "hello 'world'" {
 		t.Fatalf("unexpected sanitized value: %q", value)
-	}
-}
-
-func TestPrimaryLookupCircuitOpensAndRecovers(t *testing.T) {
-	circuit := &primaryLookupCircuit{}
-	now := time.Now()
-	for index := 0; index < primaryCircuitThreshold; index++ {
-		circuit.failure(now)
-	}
-	if circuit.allow(now.Add(time.Second)) {
-		t.Fatal("circuit remained open to requests after repeated failures")
-	}
-	if !circuit.allow(now.Add(primaryCircuitOpenFor + time.Second)) {
-		t.Fatal("circuit did not allow a probe after the open interval")
-	}
-	circuit.success()
-	if !circuit.allow(now.Add(time.Second)) {
-		t.Fatal("successful probe did not reset circuit")
 	}
 }
 
@@ -113,5 +95,40 @@ func TestManualSyncClaimPreventsDuplicateSourceRun(t *testing.T) {
 	bot.releaseManualSync("guild", identity.SourceVanity)
 	if !bot.claimManualSync("guild", identity.SourceVanity) {
 		t.Fatal("released Vanity sync could not be claimed again")
+	}
+}
+
+func TestSyncEstimate(t *testing.T) {
+	stats := manualSyncStats{StartedAt: time.Now().Add(-10 * time.Second), Total: 100, Processed: 25}
+	eta, rate, ok := syncEstimate(stats, 10*time.Second)
+	if !ok {
+		t.Fatal("expected ETA")
+	}
+	if rate < 2.4 || rate > 2.6 {
+		t.Fatalf("unexpected rate: %f", rate)
+	}
+	if eta < 29*time.Second || eta > 31*time.Second {
+		t.Fatalf("unexpected ETA: %v", eta)
+	}
+}
+
+func TestSyncCandidateFromRawCarriesPrimaryGuild(t *testing.T) {
+	enabled := true
+	candidate := syncCandidateFromRaw("guild", rawSyncMember{
+		Nick:  "nick",
+		Roles: []string{"role"},
+		User:  &rawSyncUser{ID: "user", Username: "name", PrimaryGuild: &rawPrimaryGuild{IdentityGuildID: "primary", IdentityEnabled: &enabled, Tag: "PETT"}},
+	})
+	if candidate.Member == nil || candidate.Member.User == nil || candidate.Member.User.ID != "user" {
+		t.Fatalf("member was not converted: %+v", candidate)
+	}
+	if !candidate.PrimaryKnown || candidate.PrimaryGuild == nil || candidate.PrimaryGuild.IdentityGuildID != "primary" || candidate.PrimaryGuild.Tag != "PETT" {
+		t.Fatalf("primary guild was not preserved: %+v", candidate.PrimaryGuild)
+	}
+}
+
+func TestMessageFlagsArePublic(t *testing.T) {
+	if flags := messageFlags(true); flags != 0 {
+		t.Fatalf("expected public interaction flags, got %v", flags)
 	}
 }

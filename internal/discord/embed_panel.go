@@ -37,7 +37,6 @@ func (b *Bot) embedPanelResponse(ctx context.Context, item database.EmbedTemplat
 	content := embedEditorContent(item.Name, b.config.Emojis["STAR"], b.config.WebsiteURL, b.config.DocsURL)
 	return &discordgo.InteractionResponseData{
 		Content:         content,
-		Flags:           discordgo.MessageFlagsEphemeral,
 		Embeds:          []*discordgo.MessageEmbed{preview},
 		Components:      embedPanelComponents(item.ID, ownerID, template, b.config.Emojis),
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
@@ -337,7 +336,7 @@ func (b *Bot) handleEmbedPanelModal(event *discordgo.InteractionCreate) {
 	// Modal submits cannot use the component update callback type. Keep the
 	// database work bounded by the interaction deadline and return the updated
 	// editor as the modal's original response.
-	if err := interactionRespond(b.session, event, &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral}, discordgo.InteractionResponseDeferredChannelMessageWithSource); err != nil {
+	if err := interactionRespond(b.session, event, &discordgo.InteractionResponseData{}, discordgo.InteractionResponseDeferredChannelMessageWithSource); err != nil {
 		b.logger.Error("defer embed editor modal failed", "error", err)
 		return
 	}

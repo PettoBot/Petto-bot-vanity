@@ -2,8 +2,12 @@ package discord
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,13 +17,10 @@ import (
 )
 
 const (
-	syncProgressSegments     = 8
-	syncProgressEditEvery    = 1250 * time.Millisecond
-	maxManualSyncWorkers     = 8
-	maxManualSyncQueueDepth  = 256
-	primaryCircuitThreshold  = 4
-	primaryCircuitOpenFor    = 30 * time.Second
-	maxSyncPrimaryLookupTime = 5 * time.Second
+	syncProgressSegments    = 8
+	syncProgressEditEvery   = 1250 * time.Millisecond
+	maxManualSyncWorkers    = 8
+	maxManualSyncQueueDepth = 256
 
 	syncStartFull   = "<:petto_iniciolleno:1534705766370381885>"
 	syncStartHalf   = "<:petto_iniciomediolleno:1534705752692883486>"
@@ -65,41 +66,24 @@ type syncMemberResult struct {
 	warning         string
 }
 
-type primaryLookupCircuit struct {
-	mu                  sync.Mutex
-	consecutiveFailures int
-	openUntil           time.Time
+type syncMemberCandidate struct {
+	Member       *discordgo.Member
+	PrimaryGuild *identity.PrimaryGuild
+	PrimaryKnown bool
 }
 
-func (c *primaryLookupCircuit) allow(now time.Time) bool {
-	if c == nil {
-		return true
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.openUntil.IsZero() || !now.Before(c.openUntil)
+type rawSyncUser struct {
+	ID           string           `json:"id"`
+	Username     string           `json:"username"`
+	GlobalName   string           `json:"global_name"`
+	Bot          bool             `json:"bot"`
+	PrimaryGuild *rawPrimaryGuild `json:"primary_guild"`
 }
 
-func (c *primaryLookupCircuit) success() {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	c.consecutiveFailures = 0
-	c.openUntil = time.Time{}
-	c.mu.Unlock()
-}
-
-func (c *primaryLookupCircuit) failure(now time.Time) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	c.consecutiveFailures++
-	if c.consecutiveFailures >= primaryCircuitThreshold {
-		c.openUntil = now.Add(primaryCircuitOpenFor)
-	}
-	c.mu.Unlock()
+type rawSyncMember struct {
+	User  *rawSyncUser `json:"user"`
+	Nick  string       `json:"nick"`
+	Roles []string     `json:"roles"`
 }
 
 func (s *manualSyncStats) apply(result syncMemberResult) {
@@ -150,7 +134,7 @@ func (b *Bot) startManualSync(event *discordgo.InteractionCreate, source identit
 		return
 	}
 	if !b.claimManualSync(event.GuildID, source) {
-		respond(event, fmt.Sprintf("A %s sync is already running for this server. Wait for its private progress panel to finish before starting another one.", notificationSourceName(source)), true)
+		respond(event, fmt.Sprintf("A %s sync is already running for this server. Wait for its progress panel to finish before starting another one.", notificationSourceName(source)), true)
 		return
 	}
 	stats := manualSyncStats{StartedAt: time.Now()}
@@ -160,7 +144,6 @@ func (b *Bot) startManualSync(event *discordgo.InteractionCreate, source identit
 		stage = "Loading member…"
 	}
 	data := &discordgo.InteractionResponseData{
-		Flags:  discordgo.MessageFlagsEphemeral,
 		Embeds: []*discordgo.MessageEmbed{syncProgressEmbed(source, stage, stats, b.manualSyncConcurrency(), false)},
 	}
 	if err := eventInteractionRespond(b.session, event, data); err != nil {
@@ -189,26 +172,21 @@ func (b *Bot) runManualSync(interaction *discordgo.Interaction, guildID string, 
 	if userID != "" {
 		stats.Total = 1
 		b.editManualSync(interaction, source, "Loading member…", stats, 1, false)
-		memberCtx, cancel := b.operationContext()
-		member, memberErr := b.session.GuildMember(guildID, userID, discordgo.WithContext(memberCtx))
-		cancel()
+		candidate, memberErr := b.fetchSyncMember(guildID, userID, source)
 		if memberErr != nil {
 			stats.Processed = 1
 			stats.Errors = 1
-			stats.FatalError = "Could not load the selected member: " + sanitizeSyncMessage(memberErr.Error())
+			stats.FatalError = "Could not load the selected member: " + compactSyncError(memberErr)
 			b.editManualSync(interaction, source, "Synchronization failed", stats, 1, true)
 			return
 		}
-		if member == nil || member.User == nil || member.User.Bot {
+		if candidate.Member == nil || candidate.Member.User == nil || candidate.Member.User.Bot {
 			stats.Processed = 1
 			stats.SkippedBots = 1
-			stats.LastWarning = "Bot accounts are ignored."
-			stats.Warnings = 1
-			b.editManualSync(interaction, source, "Completed with warnings", stats, 1, true)
+			b.editManualSync(interaction, source, "No eligible member to synchronize", stats, 1, true)
 			return
 		}
-		circuit := &primaryLookupCircuit{}
-		result := b.syncMemberWithSnapshot(guildID, member, source, vanityRules, tagRules, circuit)
+		result := b.syncCandidateWithSnapshot(guildID, candidate, source, vanityRules, tagRules)
 		stats.apply(result)
 		b.editManualSync(interaction, source, finalSyncStage(stats), stats, 1, true)
 		return
@@ -221,25 +199,26 @@ func (b *Bot) runManualSync(interaction *discordgo.Interaction, guildID string, 
 	if limit < maxGuildSyncMembers {
 		fetchLimit++ // fetch one extra member so the UI can report a real bound hit
 	}
-	members, err := b.fetchGuildMembersPaginated(context.Background(), guildID, fetchLimit)
+	candidates, err := b.fetchSyncMembersPaginated(context.Background(), guildID, source, fetchLimit)
 	if err != nil {
-		stats.FatalError = "Could not fetch guild members: " + sanitizeSyncMessage(err.Error())
+		stats.FatalError = "Could not fetch guild members: " + compactSyncError(err)
 		stats.Errors++
 		b.editManualSync(interaction, source, "Synchronization failed", stats, workers, true)
 		return
 	}
 
-	stats.Limited = len(members) > limit || (limit == maxGuildSyncMembers && len(members) >= limit)
-	if len(members) > limit {
-		members = members[:limit]
+	stats.Limited = len(candidates) > limit || (limit == maxGuildSyncMembers && len(candidates) >= limit)
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
 	}
-	humans := make([]*discordgo.Member, 0, len(members))
-	for _, member := range members {
+	humans := make([]syncMemberCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		member := candidate.Member
 		if member == nil || member.User == nil || member.User.Bot {
 			stats.SkippedBots++
 			continue
 		}
-		humans = append(humans, member)
+		humans = append(humans, candidate)
 	}
 	stats.Total = len(humans)
 	if stats.Total == 0 {
@@ -255,22 +234,21 @@ func (b *Bot) runManualSync(interaction *discordgo.Interaction, guildID string, 
 	if queueDepth > maxManualSyncQueueDepth {
 		queueDepth = maxManualSyncQueueDepth
 	}
-	jobs := make(chan *discordgo.Member, queueDepth)
+	jobs := make(chan syncMemberCandidate, queueDepth)
 	results := make(chan syncMemberResult, workers)
-	circuit := &primaryLookupCircuit{}
 	var group sync.WaitGroup
 	for index := 0; index < workers; index++ {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			for member := range jobs {
-				results <- b.syncMemberWithSnapshot(guildID, member, source, vanityRules, tagRules, circuit)
+			for candidate := range jobs {
+				results <- b.syncCandidateWithSnapshot(guildID, candidate, source, vanityRules, tagRules)
 			}
 		}()
 	}
 	go func() {
-		for _, member := range humans {
-			jobs <- member
+		for _, candidate := range humans {
+			jobs <- candidate
 		}
 		close(jobs)
 		group.Wait()
@@ -304,27 +282,127 @@ func (b *Bot) runManualSync(interaction *discordgo.Interaction, guildID string, 
 	)
 }
 
+func (b *Bot) fetchSyncMember(guildID, userID string, source identity.Source) (syncMemberCandidate, error) {
+	ctx, cancel := b.operationContext()
+	defer cancel()
+	if source != identity.SourceGuildTag {
+		member, err := b.session.GuildMember(guildID, userID, discordgo.WithContext(ctx))
+		if err != nil {
+			return syncMemberCandidate{}, err
+		}
+		return syncMemberCandidate{Member: member}, nil
+	}
+	endpoint := discordgo.EndpointGuildMember(guildID, userID)
+	raw, err := b.session.RequestWithBucketID(http.MethodGet, endpoint, nil, discordgo.EndpointGuildMember(guildID, ""), discordgo.WithContext(ctx))
+	if err != nil {
+		return syncMemberCandidate{}, err
+	}
+	var item rawSyncMember
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return syncMemberCandidate{}, fmt.Errorf("decode guild member: %w", err)
+	}
+	return syncCandidateFromRaw(guildID, item), nil
+}
+
+func (b *Bot) fetchSyncMembersPaginated(parent context.Context, guildID string, source identity.Source, limit int) ([]syncMemberCandidate, error) {
+	limit = boundedMemberLimit(limit)
+	if source != identity.SourceGuildTag {
+		members, err := b.fetchGuildMembersPaginated(parent, guildID, limit)
+		if err != nil {
+			return nil, err
+		}
+		result := make([]syncMemberCandidate, 0, len(members))
+		for _, member := range members {
+			result = append(result, syncMemberCandidate{Member: member})
+		}
+		return result, nil
+	}
+
+	result := make([]syncMemberCandidate, 0, limit)
+	after := ""
+	for len(result) < limit {
+		pageSize := discordMemberPageSize
+		if remaining := limit - len(result); remaining < pageSize {
+			pageSize = remaining
+		}
+		requestCtx, cancel := context.WithTimeout(parent, b.requestTimeout)
+		values := url.Values{}
+		values.Set("limit", strconv.Itoa(pageSize))
+		if after != "" {
+			values.Set("after", after)
+		}
+		baseEndpoint := discordgo.EndpointGuildMembers(guildID)
+		endpoint := baseEndpoint + "?" + values.Encode()
+		raw, err := b.session.RequestWithBucketID(http.MethodGet, endpoint, nil, baseEndpoint, discordgo.WithContext(requestCtx))
+		cancel()
+		if err != nil {
+			return result, err
+		}
+		var page []rawSyncMember
+		if err := json.Unmarshal(raw, &page); err != nil {
+			return result, fmt.Errorf("decode guild members page: %w", err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, item := range page {
+			result = append(result, syncCandidateFromRaw(guildID, item))
+		}
+		if len(page) < pageSize {
+			break
+		}
+		last := page[len(page)-1]
+		if last.User == nil || last.User.ID == "" || last.User.ID == after {
+			break
+		}
+		after = last.User.ID
+	}
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func syncCandidateFromRaw(guildID string, item rawSyncMember) syncMemberCandidate {
+	candidate := syncMemberCandidate{}
+	if item.User == nil {
+		return candidate
+	}
+	candidate.Member = &discordgo.Member{
+		GuildID: guildID,
+		Nick:    item.Nick,
+		Roles:   append([]string(nil), item.Roles...),
+		User: &discordgo.User{
+			ID:         item.User.ID,
+			Username:   item.User.Username,
+			GlobalName: item.User.GlobalName,
+			Bot:        item.User.Bot,
+		},
+	}
+	if item.User.PrimaryGuild != nil {
+		candidate.PrimaryKnown = true
+		candidate.PrimaryGuild = &identity.PrimaryGuild{
+			IdentityGuildID: item.User.PrimaryGuild.IdentityGuildID,
+			IdentityEnabled: item.User.PrimaryGuild.IdentityEnabled,
+			Tag:             item.User.PrimaryGuild.Tag,
+			Badge:           item.User.PrimaryGuild.Badge,
+		}
+	}
+	return candidate
+}
+
 func (b *Bot) loadMemberForSource(guildID, userID string, source identity.Source) (identity.MemberIdentity, bool, error) {
-	memberCtx, cancel := b.operationContext()
-	member, err := b.session.GuildMember(guildID, userID, discordgo.WithContext(memberCtx))
-	cancel()
+	candidate, err := b.fetchSyncMember(guildID, userID, source)
 	if err != nil {
 		return identity.MemberIdentity{}, false, err
 	}
-	resolved := b.cachedMemberIdentity(guildID, member, nil)
-	if source != identity.SourceGuildTag {
-		return resolved, true, nil
+	if candidate.Member == nil {
+		return identity.MemberIdentity{}, false, fmt.Errorf("member is unavailable")
 	}
-	primaryCtx, primaryCancel := b.operationContext()
-	primary, err := b.loadPrimaryGuild(primaryCtx, userID)
-	primaryCancel()
-	if err != nil {
-		return resolved, false, err
+	resolved := b.cachedMemberIdentity(guildID, candidate.Member, candidate.PrimaryGuild)
+	if source == identity.SourceGuildTag {
+		return resolved, candidate.PrimaryKnown, nil
 	}
-	if primary == nil {
-		return resolved, false, nil
-	}
-	resolved.PrimaryGuild = primary
 	return resolved, true, nil
 }
 
@@ -356,48 +434,20 @@ func (b *Bot) loadManualSyncRules(guildID string, source identity.Source) ([]ide
 	return nil, nil, fmt.Errorf("unsupported manual sync source %q", source)
 }
 
-func (b *Bot) syncMemberWithSnapshot(guildID string, member *discordgo.Member, source identity.Source, vanityRules []identity.VanityRule, tagRules []identity.GuildTagRule, circuit *primaryLookupCircuit) syncMemberResult {
+func (b *Bot) syncCandidateWithSnapshot(guildID string, candidate syncMemberCandidate, source identity.Source, vanityRules []identity.VanityRule, tagRules []identity.GuildTagRule) syncMemberResult {
+	member := candidate.Member
 	if member == nil || member.User == nil || member.User.Bot {
 		return syncMemberResult{}
 	}
-	resolved := b.cachedMemberIdentity(guildID, member, nil)
+	resolved := b.cachedMemberIdentity(guildID, member, candidate.PrimaryGuild)
 	unknownVanity := source == identity.SourceVanity && hasVanitySource(vanityRules, identity.VanityCustomStatus) && !identity.VanitySourceKnown(resolved, identity.VanityCustomStatus)
-	if source == identity.SourceGuildTag && len(tagRules) > 0 {
-		now := time.Now()
-		if !circuit.allow(now) {
-			return syncMemberResult{
-				unknownIdentity: true,
-				warnings:        1,
-				warning:         "primary_guild lookups were temporarily paused after repeated Discord errors; existing grants were preserved",
-			}
-		}
-		primaryCtx, cancel := context.WithTimeout(context.Background(), b.manualPrimaryLookupTimeout())
-		primary, err := b.loadPrimaryGuild(primaryCtx, member.User.ID)
-		cancel()
-		if err != nil {
-			circuit.failure(now)
-			return syncMemberResult{
-				unknownIdentity: true,
-				warnings:        1,
-				warning:         fmt.Sprintf("Discord could not load primary_guild for %s: %s", member.User.ID, err),
-			}
-		}
-		circuit.success()
-		if primary == nil {
-			return syncMemberResult{
-				unknownIdentity: true,
-				warnings:        1,
-				warning:         fmt.Sprintf("Discord omitted primary_guild for %s; existing Guild Tag grants were preserved", member.User.ID),
-			}
-		}
-		resolved.PrimaryGuild = primary
+	if source == identity.SourceGuildTag && len(tagRules) > 0 && !candidate.PrimaryKnown {
+		// Missing primary_guild is unknown data, not a failed sync. Preserve all
+		// existing Guild Tag grants and do not count it as a warning/error.
+		return syncMemberResult{unknownIdentity: true}
 	}
 
 	result := syncMemberResult{evaluated: true, unknownVanity: unknownVanity}
-	if unknownVanity {
-		result.warnings++
-		result.warning = "Custom Status was not cached for this member; Custom Status grants were preserved while other Vanity sources were evaluated"
-	}
 	var evaluations []identity.Evaluation
 	var evaluateErr error
 	b.withIdentityLock(guildID, member.User.ID, func() {
@@ -411,7 +461,7 @@ func (b *Bot) syncMemberWithSnapshot(guildID string, member *discordgo.Member, s
 	})
 	if evaluateErr != nil {
 		result.errors++
-		result.warning = evaluateErr.Error()
+		result.warning = compactSyncError(evaluateErr)
 		return result
 	}
 
@@ -419,7 +469,7 @@ func (b *Bot) syncMemberWithSnapshot(guildID string, member *discordgo.Member, s
 	for _, evaluation := range evaluations {
 		if evaluation.Error != nil {
 			result.errors++
-			result.warning = evaluation.Error.Error()
+			result.warning = compactSyncError(evaluation.Error)
 			continue
 		}
 		if evaluation.Changed {
@@ -478,11 +528,24 @@ func syncProgressEmbed(source identity.Source, stage string, stats manualSyncSta
 		{Name: "Role changes", Value: fmt.Sprintf("`+%d` added · `-%d` removed", stats.RolesAdded, stats.RolesRemoved), Inline: true},
 		{Name: "Decisions", Value: fmt.Sprintf("`%d` role decisions", stats.RoleDecisions), Inline: true},
 	}
+
+	elapsed := syncElapsed(stats)
+	if final {
+		fields = append(fields, &discordgo.MessageEmbedField{Name: "Completed in", Value: "`" + formatSyncDuration(elapsed) + "`", Inline: true})
+	} else if eta, rate, ok := syncEstimate(stats, elapsed); ok {
+		fields = append(fields, &discordgo.MessageEmbedField{Name: "Estimated time", Value: fmt.Sprintf("`~%s` remaining · `%.1f` members/s", formatSyncDuration(eta), rate), Inline: true})
+	}
+
 	if source == identity.SourceGuildTag {
-		fields = append(fields, &discordgo.MessageEmbedField{Name: "Identity safety", Value: fmt.Sprintf("`%d` unknown primary_guild · grants preserved", stats.UnknownIdentity), Inline: false})
+		known := stats.Evaluated
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Identity coverage",
+			Value:  fmt.Sprintf("`%d` available · `%d` unavailable\nUnavailable `primary_guild` data is treated as unknown and existing grants are preserved.", known, stats.UnknownIdentity),
+			Inline: false,
+		})
 	}
 	if source == identity.SourceVanity && stats.UnknownVanity > 0 {
-		fields = append(fields, &discordgo.MessageEmbedField{Name: "Vanity safety", Value: fmt.Sprintf("`%d` members had no cached Custom Status · those grants were preserved", stats.UnknownVanity), Inline: false})
+		fields = append(fields, &discordgo.MessageEmbedField{Name: "Vanity coverage", Value: fmt.Sprintf("`%d` members had no cached Custom Status · those grants were preserved", stats.UnknownVanity), Inline: false})
 	}
 	if stats.ManualProtected > 0 {
 		fields = append(fields, &discordgo.MessageEmbedField{Name: "Manual roles protected", Value: fmt.Sprintf("`%d` protected role states were left untouched", stats.ManualProtected), Inline: false})
@@ -491,32 +554,31 @@ func syncProgressEmbed(source identity.Source, stage string, stats manualSyncSta
 		fields = append(fields, &discordgo.MessageEmbedField{Name: "Ignored", Value: fmt.Sprintf("`%d` bot/invalid members", stats.SkippedBots), Inline: true})
 	}
 	if stats.Warnings > 0 || stats.Errors > 0 || stats.Limited || stats.FatalError != "" {
-		parts := []string{fmt.Sprintf("`%d` warnings · `%d` errors", stats.Warnings, stats.Errors)}
+		parts := make([]string, 0, 4)
+		if stats.Warnings > 0 || stats.Errors > 0 {
+			parts = append(parts, fmt.Sprintf("`%d` warnings · `%d` errors", stats.Warnings, stats.Errors))
+		}
 		if stats.Limited {
 			if stats.Limit >= maxGuildSyncMembers {
-				parts = append(parts, fmt.Sprintf("This run reached the hard safety cap of `%d` members.", maxGuildSyncMembers))
+				parts = append(parts, fmt.Sprintf("Safety cap reached at `%d` members.", maxGuildSyncMembers))
 			} else {
-				parts = append(parts, "This run reached `MANUAL_SYNC_MAX_USERS`; increase it if the server is larger.")
+				parts = append(parts, "Member limit reached; raise `MANUAL_SYNC_MAX_USERS` if you want a larger run.")
 			}
 		}
 		if stats.FatalError != "" {
-			parts = append(parts, "**Error:** "+sanitizeSyncMessage(stats.FatalError))
-		} else if stats.LastWarning != "" {
-			parts = append(parts, "Last warning: `"+sanitizeSyncMessage(stats.LastWarning)+"`")
+			parts = append(parts, "**Error:** "+compactSyncText(stats.FatalError))
+		} else if stats.LastWarning != "" && (stats.Warnings > 0 || stats.Errors > 0) {
+			parts = append(parts, "Last issue: `"+compactSyncText(stats.LastWarning)+"`")
 		}
-		fields = append(fields, &discordgo.MessageEmbedField{Name: "Warnings", Value: strings.Join(parts, "\n"), Inline: false})
+		fields = append(fields, &discordgo.MessageEmbedField{Name: "Issues", Value: strings.Join(parts, "\n"), Inline: false})
 	}
 
-	elapsed := time.Since(stats.StartedAt)
-	if stats.StartedAt.IsZero() {
-		elapsed = 0
-	}
 	return &discordgo.MessageEmbed{
 		Title:       title,
 		Description: description,
 		Color:       color,
 		Fields:      fields,
-		Footer:      &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("Private Petto sync · %s · %d worker(s)", formatSyncDuration(elapsed), workers)},
+		Footer:      &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("Petto sync · %d worker(s)", workers)},
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
 }
@@ -586,8 +648,10 @@ func finalSyncStage(stats manualSyncStats) string {
 	switch {
 	case stats.FatalError != "":
 		return "Synchronization failed"
-	case stats.Errors > 0 || stats.Warnings > 0 || stats.UnknownIdentity > 0 || stats.UnknownVanity > 0 || stats.Limited:
+	case stats.Errors > 0 || stats.Warnings > 0 || stats.Limited:
 		return "Completed with warnings"
+	case stats.UnknownIdentity > 0 || stats.UnknownVanity > 0:
+		return "Synchronization completed safely"
 	default:
 		return "Synchronization completed"
 	}
@@ -608,18 +672,58 @@ func (b *Bot) manualSyncConcurrency() int {
 	return workers
 }
 
-func (b *Bot) manualPrimaryLookupTimeout() time.Duration {
-	timeout := b.requestTimeout
-	if timeout <= 0 {
-		timeout = maxSyncPrimaryLookupTime
+func syncElapsed(stats manualSyncStats) time.Duration {
+	if stats.StartedAt.IsZero() {
+		return 0
 	}
-	if timeout > maxSyncPrimaryLookupTime {
-		timeout = maxSyncPrimaryLookupTime
+	elapsed := time.Since(stats.StartedAt)
+	if elapsed < 0 {
+		return 0
 	}
-	if timeout < time.Second {
-		timeout = time.Second
+	return elapsed
+}
+
+func syncEstimate(stats manualSyncStats, elapsed time.Duration) (time.Duration, float64, bool) {
+	if stats.Total <= 0 || stats.Processed <= 0 || stats.Processed >= stats.Total || elapsed < time.Second {
+		return 0, 0, false
 	}
-	return timeout
+	rate := float64(stats.Processed) / elapsed.Seconds()
+	if rate <= 0 {
+		return 0, 0, false
+	}
+	remaining := stats.Total - stats.Processed
+	etaSeconds := float64(remaining) / rate
+	if etaSeconds < 0 {
+		etaSeconds = 0
+	}
+	return time.Duration(etaSeconds * float64(time.Second)), rate, true
+}
+
+func compactSyncError(err error) string {
+	if err == nil {
+		return "Unknown error"
+	}
+	value := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(value, "context deadline exceeded") || strings.Contains(value, "timeout"):
+		return "Discord request timed out. Try the sync again in a moment."
+	case strings.Contains(value, "429") || strings.Contains(value, "rate limit"):
+		return "Discord rate limited the request. Try the sync again shortly."
+	case strings.Contains(value, "missing permissions") || strings.Contains(value, "missing permission"):
+		return "Missing Discord permissions for this action."
+	default:
+		return compactSyncText(err.Error())
+	}
+}
+
+func compactSyncText(value string) string {
+	value = sanitizeSyncMessage(value)
+	const maxRunes = 150
+	runes := []rune(value)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "…"
+	}
+	return value
 }
 
 func sanitizeSyncMessage(value string) string {

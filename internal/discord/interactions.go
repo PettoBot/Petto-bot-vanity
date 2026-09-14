@@ -195,7 +195,7 @@ func (b *Bot) handleCmds(event *discordgo.InteractionCreate, data discordgo.Appl
 
 func (b *Bot) handleSetup(event *discordgo.InteractionCreate) {
 	content := "**Vanity Tag Bot · Guided setup**\n\nFollow these steps once. Every completed form is saved immediately.\n\n**1 · Action logs**\nThe private staff log for role additions, removals, reasons, and errors. Run `/logs setup` in the channel you want to use.\n\n**2 · Matching rules**\nChoose **Custom Status** to match the text shown on a member's Discord profile, or choose **Server Tag** to match Discord's identity guild data.\n\n**3 · Bot profile**\nSet this server's nickname and bio. Use `/set avatar` and `/set banner` for a Discord upload or HTTPS image.\n\n**4 · Thank-you messages**\nChoose where Vanity and Server Tag members receive their notification, which embed to use, and whether to mention them.\n\n**Before testing:** give the bot Manage Roles, move its role above the roles it must manage, and enable Server Members and Presence intents in the Developer Portal. Use `/config view` to see what is configured." + editorLinks(b.config.WebsiteURL, b.config.DocsURL)
-	data := &discordgo.InteractionResponseData{Content: content, Flags: discordgo.MessageFlagsEphemeral, Components: []discordgo.MessageComponent{
+	data := &discordgo.InteractionResponseData{Content: content, Components: []discordgo.MessageComponent{
 		&discordgo.ActionsRow{Components: []discordgo.MessageComponent{&discordgo.Button{Style: discordgo.PrimaryButton, Label: "1 · Choose log channel", CustomID: "setup:logs"}, &discordgo.Button{Style: discordgo.PrimaryButton, Label: "2 · Custom Status rule", CustomID: "setup:vanity"}, &discordgo.Button{Style: discordgo.PrimaryButton, Label: "2 · Server Tag rule", CustomID: "setup:guildtag"}}},
 		&discordgo.ActionsRow{Components: []discordgo.MessageComponent{&discordgo.Button{Style: discordgo.SecondaryButton, Label: "3 · Bot profile", CustomID: "setup:profile"}, &discordgo.Button{Style: discordgo.SecondaryButton, Label: "4 · Thank-you messages", CustomID: "setup:embeds"}, &discordgo.Button{Style: discordgo.SuccessButton, Label: "Close setup", CustomID: "setup:cancel"}}},
 	}}
@@ -759,7 +759,7 @@ func (b *Bot) handleEmbed(event *discordgo.InteractionCreate, data discordgo.App
 			return
 		}
 		if command == "preview" {
-			replyData(&discordgo.InteractionResponseData{Content: payload.Content, Flags: discordgo.MessageFlagsEphemeral, Embeds: payload.Embeds, Components: payload.Components, AllowedMentions: payload.AllowedMentions})
+			replyData(&discordgo.InteractionResponseData{Content: payload.Content, Embeds: payload.Embeds, Components: payload.Components, AllowedMentions: payload.AllowedMentions})
 			return
 		}
 		replyData(&discordgo.InteractionResponseData{Content: payload.Content, Embeds: payload.Embeds, Components: payload.Components, AllowedMentions: payload.AllowedMentions})
@@ -823,9 +823,7 @@ func (b *Bot) handleEmbed(event *discordgo.InteractionCreate, data discordgo.App
 }
 
 func messageFlags(ephemeral bool) discordgo.MessageFlags {
-	if ephemeral {
-		return discordgo.MessageFlagsEphemeral
-	}
+	_ = ephemeral
 	return 0
 }
 
@@ -1089,7 +1087,7 @@ func (b *Bot) handleSetupComponent(event *discordgo.InteractionCreate, id string
 }
 
 func (b *Bot) updateSetupChoice(event *discordgo.InteractionCreate, content, customID string, options []discordgo.SelectMenuOption) {
-	data := &discordgo.InteractionResponseData{Content: content, Flags: discordgo.MessageFlagsEphemeral, Components: []discordgo.MessageComponent{&discordgo.ActionsRow{Components: []discordgo.MessageComponent{&discordgo.SelectMenu{MenuType: discordgo.StringSelectMenu, CustomID: customID, Placeholder: "Choose one option", Options: options}}}, &discordgo.ActionsRow{Components: []discordgo.MessageComponent{&discordgo.Button{Style: discordgo.SecondaryButton, Label: "Close", CustomID: "setup:cancel"}}}}}
+	data := &discordgo.InteractionResponseData{Content: content, Components: []discordgo.MessageComponent{&discordgo.ActionsRow{Components: []discordgo.MessageComponent{&discordgo.SelectMenu{MenuType: discordgo.StringSelectMenu, CustomID: customID, Placeholder: "Choose one option", Options: options}}}, &discordgo.ActionsRow{Components: []discordgo.MessageComponent{&discordgo.Button{Style: discordgo.SecondaryButton, Label: "Close", CustomID: "setup:cancel"}}}}}
 	if err := interactionRespond(b.session, event, data, discordgo.InteractionResponseUpdateMessage); err != nil {
 		b.logger.Warn("update setup choice failed", "error", err)
 	}
@@ -1097,7 +1095,7 @@ func (b *Bot) updateSetupChoice(event *discordgo.InteractionCreate, content, cus
 
 func (b *Bot) updateSetupRoleChoice(event *discordgo.InteractionCreate, content, customID string) {
 	components := []discordgo.MessageComponent{&discordgo.ActionsRow{Components: []discordgo.MessageComponent{&discordgo.SelectMenu{MenuType: discordgo.RoleSelectMenu, CustomID: customID, Placeholder: "Choose a role"}}}, &discordgo.ActionsRow{Components: []discordgo.MessageComponent{&discordgo.Button{Style: discordgo.SecondaryButton, Label: "Close", CustomID: "setup:cancel"}}}}
-	data := &discordgo.InteractionResponseData{Content: content, Flags: discordgo.MessageFlagsEphemeral, Components: components}
+	data := &discordgo.InteractionResponseData{Content: content, Components: components}
 	if err := interactionRespond(b.session, event, data, discordgo.InteractionResponseUpdateMessage); err != nil {
 		b.logger.Warn("update setup role choice failed", "error", err)
 	}
@@ -1360,30 +1358,37 @@ func actorID(event *discordgo.InteractionCreate) string {
 }
 
 func (b *Bot) loadMemberIdentity(ctx context.Context, guildID, userID string) (identity.MemberIdentity, error) {
-	member, err := b.session.GuildMember(guildID, userID, discordgo.WithContext(ctx))
+	endpoint := discordgo.EndpointGuildMember(guildID, userID)
+	raw, err := b.session.RequestWithBucketID(http.MethodGet, endpoint, nil, discordgo.EndpointGuildMember(guildID, ""), discordgo.WithContext(ctx))
 	if err != nil {
 		return identity.MemberIdentity{}, err
 	}
-	primary, err := b.loadPrimaryGuild(ctx, userID)
-	if err != nil {
-		return identity.MemberIdentity{}, err
+	var item rawSyncMember
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return identity.MemberIdentity{}, fmt.Errorf("decode guild member %s: %w", userID, err)
 	}
-	return b.cachedMemberIdentity(guildID, member, primary), nil
+	candidate := syncCandidateFromRaw(guildID, item)
+	if candidate.Member == nil {
+		return identity.MemberIdentity{}, fmt.Errorf("member %s is unavailable", userID)
+	}
+	return b.cachedMemberIdentity(guildID, candidate.Member, candidate.PrimaryGuild), nil
 }
 
-func (b *Bot) loadPrimaryGuild(ctx context.Context, userID string) (*identity.PrimaryGuild, error) {
-	raw, err := b.session.Request(http.MethodGet, discordgo.EndpointUser(userID), nil, discordgo.WithContext(ctx))
+func (b *Bot) loadPrimaryGuildForGuild(ctx context.Context, guildID, userID string) (*identity.PrimaryGuild, error) {
+	endpoint := discordgo.EndpointGuildMember(guildID, userID)
+	raw, err := b.session.RequestWithBucketID(http.MethodGet, endpoint, nil, discordgo.EndpointGuildMember(guildID, ""), discordgo.WithContext(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("load primary_guild for %s: %w", userID, err)
 	}
-	payload, err := decodePrimaryGuild(raw)
-	if err != nil {
-		return nil, err
+	var item rawSyncMember
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return nil, fmt.Errorf("decode primary_guild for %s: %w", userID, err)
 	}
-	if payload.PrimaryGuild == nil {
+	candidate := syncCandidateFromRaw(guildID, item)
+	if !candidate.PrimaryKnown {
 		return nil, nil
 	}
-	return &identity.PrimaryGuild{IdentityGuildID: payload.PrimaryGuild.IdentityGuildID, IdentityEnabled: payload.PrimaryGuild.IdentityEnabled, Tag: payload.PrimaryGuild.Tag, Badge: payload.PrimaryGuild.Badge}, nil
+	return candidate.PrimaryGuild, nil
 }
 
 func profileUpdateError(prefix string, err error) string {
@@ -1404,11 +1409,8 @@ func profileUpdateError(prefix string, err error) string {
 }
 
 func respond(event *discordgo.InteractionCreate, content string, ephemeral bool) {
-	flags := discordgo.MessageFlags(0)
-	if ephemeral {
-		flags = discordgo.MessageFlagsEphemeral
-	}
-	_ = eventInteractionRespond(nil, event, &discordgo.InteractionResponseData{Content: content, Flags: flags})
+	_ = ephemeral
+	_ = eventInteractionRespond(nil, event, &discordgo.InteractionResponseData{Content: content})
 }
 
 func eventInteractionRespond(session *discordgo.Session, event *discordgo.InteractionCreate, data *discordgo.InteractionResponseData) error {

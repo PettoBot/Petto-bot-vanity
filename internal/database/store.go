@@ -108,7 +108,7 @@ func (s *Store) ManagedRoleIDs(ctx context.Context, guildID, userID string) ([]s
 		WHERE guild_id=$1 AND user_id=$2 AND bot_added_role=true
 		UNION
 		SELECT role_id FROM identity_role_grants
-		WHERE guild_id=$1 AND user_id=$2 AND matched=true`, guildID, userID)
+		WHERE guild_id=$1 AND user_id=$2 AND (matched=true OR bot_added_role=true)`, guildID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -199,15 +199,27 @@ func (s *Store) GetRoleState(ctx context.Context, guildID, userID, roleID string
 
 func (s *Store) ObserveRolePresence(ctx context.Context, guildID, userID, roleID string, present bool) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO identity_role_state(guild_id,user_id,role_id,manual_marked,last_known_present,created_at,updated_at)
-		VALUES ($1,$2,$3,$4,$4,now(),now())
+		INSERT INTO identity_role_state(
+			guild_id,user_id,role_id,bot_added_role,manual_marked,last_known_present,created_at,updated_at
+		)
+		SELECT $1,$2,$3,
+			EXISTS (
+				SELECT 1 FROM identity_role_grants
+				WHERE guild_id=$1 AND user_id=$2 AND role_id=$3 AND bot_added_role=true
+			),
+			$4 AND NOT EXISTS (
+				SELECT 1 FROM identity_role_grants
+				WHERE guild_id=$1 AND user_id=$2 AND role_id=$3 AND bot_added_role=true
+			),
+			$4,now(),now()
 		ON CONFLICT (guild_id,user_id,role_id) DO UPDATE SET
 			manual_marked=CASE
-				WHEN $4=true AND (identity_role_state.bot_added_role=false OR identity_role_state.last_known_present=false) THEN true
+				WHEN $4=true AND identity_role_state.bot_added_role=true AND identity_role_state.last_known_present=false THEN true
+				WHEN $4=true AND identity_role_state.bot_added_role=false THEN true
 				ELSE identity_role_state.manual_marked
 			END,
 			bot_added_role=CASE
-				WHEN $4=true AND identity_role_state.last_known_present=false THEN false
+				WHEN $4=true AND identity_role_state.bot_added_role=true AND identity_role_state.last_known_present=false THEN false
 				ELSE identity_role_state.bot_added_role
 			END,
 			last_known_present=$4, updated_at=now()`, guildID, userID, roleID, present)
@@ -215,20 +227,47 @@ func (s *Store) ObserveRolePresence(ctx context.Context, guildID, userID, roleID
 }
 
 func (s *Store) MarkBotAdded(ctx context.Context, guildID, userID, roleID string) error {
-	_, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO identity_role_state(guild_id,user_id,role_id,bot_added_role,manual_marked,last_known_present,created_at,updated_at)
 		VALUES ($1,$2,$3,true,false,true,now(),now())
 		ON CONFLICT (guild_id,user_id,role_id) DO UPDATE SET
-			bot_added_role=true,manual_marked=false,last_known_present=true,updated_at=now()`, guildID, userID, roleID)
-	return err
+			bot_added_role=true,manual_marked=false,last_known_present=true,updated_at=now()`, guildID, userID, roleID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE identity_role_grants
+		SET bot_added_role=true,updated_at=now()
+		WHERE guild_id=$1 AND user_id=$2 AND role_id=$3 AND action=$4 AND matched=true`,
+		guildID, userID, roleID, identity.ActionAddRole); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) MarkBotRemoved(ctx context.Context, guildID, userID, roleID string) error {
-	_, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
 		UPDATE identity_role_state
 		SET bot_added_role=false,manual_marked=false,last_known_present=false,updated_at=now()
-		WHERE guild_id=$1 AND user_id=$2 AND role_id=$3`, guildID, userID, roleID)
-	return err
+		WHERE guild_id=$1 AND user_id=$2 AND role_id=$3`, guildID, userID, roleID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE identity_role_grants
+		SET bot_added_role=false,updated_at=now()
+		WHERE guild_id=$1 AND user_id=$2 AND role_id=$3`, guildID, userID, roleID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) RecordAudit(ctx context.Context, audit identity.AuditIntent) error {

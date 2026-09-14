@@ -138,7 +138,7 @@ func (b *Bot) evaluateMemberForSource(guildID string, member identity.MemberIden
 
 			if len(tagRules) > 0 && member.PrimaryGuild == nil && member.UserID != "" {
 				primaryCtx, primaryCancel := b.operationContext()
-				primary, loadErr := b.loadPrimaryGuildForGuild(primaryCtx, guildID, member.UserID)
+				primary, primaryKnown, loadErr := b.loadPrimaryGuildForGuild(primaryCtx, guildID, member.UserID)
 				primaryCancel()
 				if loadErr != nil {
 					b.logger.Warn("load member primary_guild failed; skipping guild tag evaluation", "guild_id", guildID, "user_id", member.UserID, "error", loadErr)
@@ -146,11 +146,14 @@ func (b *Bot) evaluateMemberForSource(guildID string, member identity.MemberIden
 					// evaluated. Existing Guild Tag grants remain untouched until
 					// Discord provides authoritative primary_guild data again.
 					tagRules = nil
-				} else if primary == nil {
-					// Discord omitted primary_guild. That means unknown, not
-					// identity_disabled and not a negative comparison match.
+				} else if !primaryKnown {
+					// The field was omitted entirely. That is unknown data, not
+					// "no tag", so preserve previous Guild Tag grants.
 					tagRules = nil
 				} else {
+					// A present field with JSON null is authoritative "no primary
+					// guild". Keep tagRules non-nil so previous add grants are
+					// invalidated and bot-owned roles can be removed.
 					member.PrimaryGuild = primary
 				}
 			}

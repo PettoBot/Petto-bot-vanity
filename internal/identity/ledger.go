@@ -64,7 +64,7 @@ func (m *MemoryLedger) ManagedRoleIDs(_ context.Context, guildID, userID string)
 		}
 	}
 	for _, grant := range m.grants {
-		if grant.GuildID == guildID && grant.UserID == userID && grant.Matched && grant.RoleID != "" {
+		if grant.GuildID == guildID && grant.UserID == userID && (grant.Matched || grant.BotAddedRole) && grant.RoleID != "" {
 			roles[grant.RoleID] = struct{}{}
 		}
 	}
@@ -126,11 +126,20 @@ func (m *MemoryLedger) ObserveRolePresence(_ context.Context, guildID, userID, r
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := stateKey(guildID, userID, roleID)
-	state := m.states[key]
-	if present && (!state.BotAddedRole || !state.LastKnownPresent) {
-		// A present role that Petto does not currently own is manual. The
-		// lastKnownPresent=false case also repairs ownership left behind by
-		// older versions whose MarkBotRemoved did not clear bot_added_role.
+	state, stateExists := m.states[key]
+	if !stateExists {
+		for _, grant := range m.grants {
+			if grant.GuildID == guildID && grant.UserID == userID && grant.RoleID == roleID && grant.BotAddedRole {
+				state.BotAddedRole = true
+				break
+			}
+		}
+		if present && !state.BotAddedRole {
+			state.ManualMarked = true
+		}
+	} else if present && (!state.BotAddedRole || !state.LastKnownPresent) {
+		// A role that reappears after Petto observed it absent is a manual
+		// re-add. Clear ownership so automation never removes that new grant.
 		state.ManualMarked = true
 		state.BotAddedRole = false
 	}
@@ -150,6 +159,12 @@ func (m *MemoryLedger) MarkBotAdded(_ context.Context, guildID, userID, roleID s
 	state.ManualMarked = false
 	state.LastKnownPresent = true
 	m.states[key] = state
+	for grantKey, grant := range m.grants {
+		if grant.GuildID == guildID && grant.UserID == userID && grant.RoleID == roleID && grant.Action == ActionAddRole && grant.Matched {
+			grant.BotAddedRole = true
+			m.grants[grantKey] = grant
+		}
+	}
 	return nil
 }
 
@@ -163,6 +178,12 @@ func (m *MemoryLedger) MarkBotRemoved(_ context.Context, guildID, userID, roleID
 	state.ManualMarked = false
 	state.LastKnownPresent = false
 	m.states[key] = state
+	for grantKey, grant := range m.grants {
+		if grant.GuildID == guildID && grant.UserID == userID && grant.RoleID == roleID {
+			grant.BotAddedRole = false
+			m.grants[grantKey] = grant
+		}
+	}
 	return nil
 }
 

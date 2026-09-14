@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -130,5 +131,28 @@ func TestSyncCandidateFromRawCarriesPrimaryGuild(t *testing.T) {
 func TestMessageFlagsArePublic(t *testing.T) {
 	if flags := messageFlags(true); flags != 0 {
 		t.Fatalf("expected public interaction flags, got %v", flags)
+	}
+}
+
+func TestRawSyncUserDistinguishesNullPrimaryGuildFromOmitted(t *testing.T) {
+	var explicitNull rawSyncMember
+	if err := json.Unmarshal([]byte(`{"user":{"id":"user-null","username":"name","primary_guild":null},"roles":[]}`), &explicitNull); err != nil {
+		t.Fatal(err)
+	}
+	nullCandidate := syncCandidateFromRaw("guild", explicitNull)
+	if !nullCandidate.PrimaryKnown {
+		t.Fatal("primary_guild:null must be treated as authoritative known absence")
+	}
+	if nullCandidate.PrimaryGuild != nil {
+		t.Fatalf("expected nil primary guild for explicit null, got %#v", nullCandidate.PrimaryGuild)
+	}
+
+	var omitted rawSyncMember
+	if err := json.Unmarshal([]byte(`{"user":{"id":"user-omitted","username":"name"},"roles":[]}`), &omitted); err != nil {
+		t.Fatal(err)
+	}
+	omittedCandidate := syncCandidateFromRaw("guild", omitted)
+	if omittedCandidate.PrimaryKnown {
+		t.Fatal("omitted primary_guild must remain unknown")
 	}
 }

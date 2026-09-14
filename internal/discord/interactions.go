@@ -1374,21 +1374,18 @@ func (b *Bot) loadMemberIdentity(ctx context.Context, guildID, userID string) (i
 	return b.cachedMemberIdentity(guildID, candidate.Member, candidate.PrimaryGuild), nil
 }
 
-func (b *Bot) loadPrimaryGuildForGuild(ctx context.Context, guildID, userID string) (*identity.PrimaryGuild, error) {
+func (b *Bot) loadPrimaryGuildForGuild(ctx context.Context, guildID, userID string) (*identity.PrimaryGuild, bool, error) {
 	endpoint := discordgo.EndpointGuildMember(guildID, userID)
 	raw, err := b.session.RequestWithBucketID(http.MethodGet, endpoint, nil, discordgo.EndpointGuildMember(guildID, ""), discordgo.WithContext(ctx))
 	if err != nil {
-		return nil, fmt.Errorf("load primary_guild for %s: %w", userID, err)
+		return nil, false, fmt.Errorf("load primary_guild for %s: %w", userID, err)
 	}
 	var item rawSyncMember
 	if err := json.Unmarshal(raw, &item); err != nil {
-		return nil, fmt.Errorf("decode primary_guild for %s: %w", userID, err)
+		return nil, false, fmt.Errorf("decode primary_guild for %s: %w", userID, err)
 	}
 	candidate := syncCandidateFromRaw(guildID, item)
-	if !candidate.PrimaryKnown {
-		return nil, nil
-	}
-	return candidate.PrimaryGuild, nil
+	return candidate.PrimaryGuild, candidate.PrimaryKnown, nil
 }
 
 func profileUpdateError(prefix string, err error) string {

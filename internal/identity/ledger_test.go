@@ -397,3 +397,56 @@ func TestUnknownCustomStatusPreservesPreviousGrant(t *testing.T) {
 		t.Fatalf("known empty custom status should remove the bot-owned role, got %#v", roles.removed)
 	}
 }
+
+func TestKnownNoPrimaryGuildRevokesManagedGuildTagGrant(t *testing.T) {
+	ledger := NewMemoryLedger()
+	roles := &fakeRoles{}
+	engine := Engine{Store: ledger, Roles: roles}
+	enabled := true
+	rules := []GuildTagRule{{
+		ID: "tag-known-null", GuildID: "guild", Name: "tag", Condition: ConditionIsGuildID,
+		Value: "source", RoleID: "role", Action: ActionAddRole, Enabled: true,
+	}}
+	member := MemberIdentity{
+		GuildID: "guild", UserID: "user", RoleIDs: map[string]struct{}{},
+		PrimaryGuild: &PrimaryGuild{IdentityGuildID: "source", IdentityEnabled: &enabled},
+	}
+	if _, err := engine.Evaluate(context.Background(), member, nil, rules); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.added) != 1 {
+		t.Fatalf("expected initial role add, got %#v", roles.added)
+	}
+
+	// Explicit primary_guild:null is represented by a known evaluation with a
+	// nil PrimaryGuild. The caller passes a non-nil tag rule slice so stale
+	// grants are invalidated. This must revoke a role Petto previously added.
+	member.PrimaryGuild = nil
+	member.RoleIDs = map[string]struct{}{"role": {}}
+	if _, err := engine.Evaluate(context.Background(), member, nil, rules); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.removed) != 1 {
+		t.Fatalf("known no-primary-guild must remove stale bot role, got %#v", roles.removed)
+	}
+}
+
+func TestHistoricalGrantOwnershipRecoversMissingRoleState(t *testing.T) {
+	ledger := NewMemoryLedger()
+	roles := &fakeRoles{}
+	engine := Engine{Store: ledger, Roles: roles}
+	ledger.mu.Lock()
+	ledger.grants[grantKey("guild", "user", "role", "old-rule")] = RoleGrant{
+		GuildID: "guild", UserID: "user", RoleID: "role", RuleID: "old-rule",
+		SourceType: SourceGuildTag, Action: ActionAddRole, Matched: false, BotAddedRole: true,
+	}
+	ledger.mu.Unlock()
+
+	member := MemberIdentity{GuildID: "guild", UserID: "user", RoleIDs: map[string]struct{}{"role": {}}}
+	if _, err := engine.Evaluate(context.Background(), member, []VanityRule{}, []GuildTagRule{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(roles.removed) != 1 {
+		t.Fatalf("historical bot ownership should recover cleanup eligibility, got %#v", roles.removed)
+	}
+}

@@ -73,11 +73,38 @@ type syncMemberCandidate struct {
 }
 
 type rawSyncUser struct {
-	ID           string           `json:"id"`
-	Username     string           `json:"username"`
-	GlobalName   string           `json:"global_name"`
-	Bot          bool             `json:"bot"`
-	PrimaryGuild *rawPrimaryGuild `json:"primary_guild"`
+	ID                string           `json:"id"`
+	Username          string           `json:"username"`
+	GlobalName        string           `json:"global_name"`
+	Bot               bool             `json:"bot"`
+	PrimaryGuild      *rawPrimaryGuild `json:"primary_guild"`
+	PrimaryGuildKnown bool             `json:"-"`
+}
+
+func (u *rawSyncUser) UnmarshalJSON(data []byte) error {
+	type rawSyncUserAlias rawSyncUser
+	var decoded rawSyncUserAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*u = rawSyncUser(decoded)
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	raw, present := fields["primary_guild"]
+	u.PrimaryGuildKnown = present
+	if !present || string(raw) == "null" {
+		u.PrimaryGuild = nil
+		return nil
+	}
+	var primary rawPrimaryGuild
+	if err := json.Unmarshal(raw, &primary); err != nil {
+		return fmt.Errorf("decode primary_guild: %w", err)
+	}
+	u.PrimaryGuild = &primary
+	return nil
 }
 
 type rawSyncMember struct {
@@ -379,8 +406,8 @@ func syncCandidateFromRaw(guildID string, item rawSyncMember) syncMemberCandidat
 			Bot:        item.User.Bot,
 		},
 	}
+	candidate.PrimaryKnown = item.User.PrimaryGuildKnown || item.User.PrimaryGuild != nil
 	if item.User.PrimaryGuild != nil {
-		candidate.PrimaryKnown = true
 		candidate.PrimaryGuild = &identity.PrimaryGuild{
 			IdentityGuildID: item.User.PrimaryGuild.IdentityGuildID,
 			IdentityEnabled: item.User.PrimaryGuild.IdentityEnabled,
@@ -515,7 +542,7 @@ func syncProgressEmbed(source identity.Source, stage string, stats manualSyncSta
 		switch {
 		case stats.FatalError != "" || stats.Errors > 0:
 			color = 0xED4245
-		case stats.Warnings > 0 || stats.UnknownIdentity > 0 || stats.UnknownVanity > 0 || stats.Limited:
+		case stats.Warnings > 0 || stats.Limited:
 			color = 0xFEE75C
 		default:
 			color = 0x57F287
@@ -540,7 +567,7 @@ func syncProgressEmbed(source identity.Source, stage string, stats manualSyncSta
 		known := stats.Evaluated
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Identity coverage",
-			Value:  fmt.Sprintf("`%d` available · `%d` unavailable\nUnavailable `primary_guild` data is treated as unknown and existing grants are preserved.", known, stats.UnknownIdentity),
+			Value:  fmt.Sprintf("`%d` resolved · `%d` unknown\nResolved includes explicit `primary_guild: null` (no Server Tag). Only omitted data is preserved as unknown.", known, stats.UnknownIdentity),
 			Inline: false,
 		})
 	}

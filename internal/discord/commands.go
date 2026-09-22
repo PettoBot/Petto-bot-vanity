@@ -95,7 +95,7 @@ func identityOptions() []*discordgo.ApplicationCommandOption {
 
 func logsOptions() []*discordgo.ApplicationCommandOption {
 	return []*discordgo.ApplicationCommandOption{
-		sub("setup", "Set the current channel as the log channel", nil),
+		sub("setup", "Configure the action-log channel", []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionChannel, Name: "channel", Description: "Channel that receives action logs (defaults to this channel)", Required: false}}),
 		sub("set", "Set or clear log events", []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionChannel, Name: "channel", Description: "Log channel", Required: true}, stringOption("events", "Comma-separated event names", true, 1, 512)}),
 		sub("view", "View log configuration", nil),
 		sub("test", "Send a safe action-log test embed", []*discordgo.ApplicationCommandOption{choiceOption("event", "Action-log event to test", false, logs.EventKeys()...)}),

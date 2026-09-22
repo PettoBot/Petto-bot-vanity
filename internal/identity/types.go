@@ -106,6 +106,7 @@ type MemberIdentity struct {
 	GlobalName           string
 	GuildNickname        string
 	DisplayName          string
+	AvatarURL            string
 	CustomStatus         string
 	UnknownVanitySources map[VanitySource]struct{}
 	PrimaryGuild         *PrimaryGuild
@@ -157,24 +158,27 @@ type AuditIntent struct {
 }
 
 type ActionEvent struct {
-	GuildID       string
-	UserID        string
-	RoleID        string
-	RuleID        string
-	RuleName      string
-	RuleCondition string
-	MatchField    string
-	MatchedValue  string
-	Tag           string
-	TagGuildID    string
-	TagEnabled    string
-	TagBadge      string
-	Source        Source
-	Action        Action
-	Value         string
-	Reason        string
-	Result        string
-	Error         error
+	GuildID         string
+	UserID          string
+	UserName        string
+	UserDisplayName string
+	UserAvatar      string
+	RoleID          string
+	RuleID          string
+	RuleName        string
+	RuleCondition   string
+	MatchField      string
+	MatchedValue    string
+	Tag             string
+	TagGuildID      string
+	TagEnabled      string
+	TagBadge        string
+	Source          Source
+	Action          Action
+	Value           string
+	Reason          string
+	Result          string
+	Error           error
 }
 
 type ActionLogger interface {

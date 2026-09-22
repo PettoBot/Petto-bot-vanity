@@ -82,7 +82,7 @@ func (e *Engine) Evaluate(ctx context.Context, member MemberIdentity, vanityRule
 		}
 		matchedValue := VanityValue(member, rule.Source)
 		actionContext := ActionEvent{
-			GuildID: member.GuildID, UserID: member.UserID, RoleID: rule.RoleID, RuleID: rule.ID,
+			GuildID: member.GuildID, UserID: member.UserID, UserName: member.Username, UserDisplayName: member.DisplayName, UserAvatar: member.AvatarURL, RoleID: rule.RoleID, RuleID: rule.ID,
 			RuleName: rule.Name, RuleCondition: string(rule.Comparison), MatchField: string(rule.Source), MatchedValue: matchedValue,
 			Source: SourceVanity, Action: rule.Action, Value: rule.Word,
 			Reason: fmt.Sprintf("No longer matched %s condition for value %s", rule.Source, matchedValue),
@@ -125,7 +125,7 @@ func (e *Engine) Evaluate(ctx context.Context, member MemberIdentity, vanityRule
 			}
 		}
 		actionContext := ActionEvent{
-			GuildID: member.GuildID, UserID: member.UserID, RoleID: rule.RoleID, RuleID: rule.ID,
+			GuildID: member.GuildID, UserID: member.UserID, UserName: member.Username, UserDisplayName: member.DisplayName, UserAvatar: member.AvatarURL, RoleID: rule.RoleID, RuleID: rule.ID,
 			RuleName: rule.Name, RuleCondition: string(rule.Condition), MatchedValue: rule.Value,
 			Tag: tag, TagGuildID: tagGuildID, TagEnabled: tagEnabled, TagBadge: tagBadge,
 			Source: SourceGuildTag, Action: rule.Action, Value: rule.Value,
@@ -299,11 +299,14 @@ func actionForRole(contexts map[string]ActionEvent, member MemberIdentity, roleI
 		return event
 	}
 	return ActionEvent{
-		GuildID: member.GuildID,
-		UserID:  member.UserID,
-		RoleID:  roleID,
-		Action:  action,
-		Reason:  "Role no longer justified by an active matching rule",
+		GuildID:         member.GuildID,
+		UserID:          member.UserID,
+		UserName:        member.Username,
+		UserDisplayName: member.DisplayName,
+		UserAvatar:      member.AvatarURL,
+		RoleID:          roleID,
+		Action:          action,
+		Reason:          "Role no longer justified by an active matching rule",
 	}
 }
 

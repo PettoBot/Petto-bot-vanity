@@ -581,12 +581,16 @@ func (b *Bot) handleLogs(event *discordgo.InteractionCreate, data discordgo.Appl
 	}
 	switch strings.Join(path, " ") {
 	case "setup":
-		config := databaseLogConfig(guildID, event.ChannelID, strings.Join(logs.EventKeys(), ","))
+		channelID := optionString(options, "channel")
+		if channelID == "" {
+			channelID = event.ChannelID
+		}
+		config := databaseLogConfig(guildID, channelID, strings.Join(logs.EventKeys(), ","))
 		if err := b.store.SetLogConfig(ctx, config); err != nil {
 			respond(event, err.Error(), true)
 			return
 		}
-		respond(event, "Action-log channel configured. This channel receives role additions, removals, reasons, and errors. User notifications are configured separately with `/vanity notify` and `/guildtag notify`.", true)
+		respond(event, fmt.Sprintf("Action-log channel configured: <#%s>. This channel receives role additions, removals, reasons, and errors. User notifications are configured separately with `/vanity notify` and `/guildtag notify`.", channelID), true)
 	case "set":
 		channel := optionString(options, "channel")
 		events := map[string]bool{}

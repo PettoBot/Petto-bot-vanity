@@ -76,6 +76,7 @@ type rawSyncUser struct {
 	ID                string           `json:"id"`
 	Username          string           `json:"username"`
 	GlobalName        string           `json:"global_name"`
+	Avatar            string           `json:"avatar"`
 	Bot               bool             `json:"bot"`
 	PrimaryGuild      *rawPrimaryGuild `json:"primary_guild"`
 	PrimaryGuildKnown bool             `json:"-"`
@@ -108,9 +109,10 @@ func (u *rawSyncUser) UnmarshalJSON(data []byte) error {
 }
 
 type rawSyncMember struct {
-	User  *rawSyncUser `json:"user"`
-	Nick  string       `json:"nick"`
-	Roles []string     `json:"roles"`
+	User   *rawSyncUser `json:"user"`
+	Nick   string       `json:"nick"`
+	Avatar string       `json:"avatar"`
+	Roles  []string     `json:"roles"`
 }
 
 func (s *manualSyncStats) apply(result syncMemberResult) {
@@ -398,11 +400,13 @@ func syncCandidateFromRaw(guildID string, item rawSyncMember) syncMemberCandidat
 	candidate.Member = &discordgo.Member{
 		GuildID: guildID,
 		Nick:    item.Nick,
+		Avatar:  item.Avatar,
 		Roles:   append([]string(nil), item.Roles...),
 		User: &discordgo.User{
 			ID:         item.User.ID,
 			Username:   item.User.Username,
 			GlobalName: item.User.GlobalName,
+			Avatar:     item.User.Avatar,
 			Bot:        item.User.Bot,
 		},
 	}

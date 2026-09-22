@@ -45,3 +45,20 @@ func TestGuildTagNotificationUsesVisibleTagInsteadOfRuleID(t *testing.T) {
 		t.Fatalf("notification rule value = %q, want guild ID", vars.TagRuleValue)
 	}
 }
+
+func TestNotificationVariablesCarryMatchedUserPresentation(t *testing.T) {
+	vars := variables(identity.ActionEvent{
+		UserID: "user", UserName: "liam", UserDisplayName: "Liam",
+		UserAvatar: "https://cdn.discordapp.com/avatars/user/hash.png",
+		RoleID:     "role", Source: identity.SourceGuildTag, Action: identity.ActionAddRole, Result: "completed",
+	})
+	if vars.UserName != "liam" {
+		t.Fatalf("user.name = %q", vars.UserName)
+	}
+	if vars.UserDisplayName != "Liam" {
+		t.Fatalf("user.display_name = %q", vars.UserDisplayName)
+	}
+	if vars.UserAvatar != "https://cdn.discordapp.com/avatars/user/hash.png" {
+		t.Fatalf("user.avatar = %q", vars.UserAvatar)
+	}
+}

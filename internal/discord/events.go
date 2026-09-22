@@ -209,7 +209,8 @@ func memberIdentity(guildID string, member *discordgo.Member, primary *identity.
 	result.GuildNickname = member.Nick
 	if member.User != nil {
 		result.UserID, result.IsBot, result.Username, result.GlobalName = member.User.ID, member.User.Bot, member.User.Username, member.User.GlobalName
-		result.DisplayName = member.User.DisplayName()
+		result.DisplayName = member.DisplayName()
+		result.AvatarURL = member.AvatarURL("256")
 	}
 	for _, roleID := range member.Roles {
 		result.RoleIDs[roleID] = struct{}{}

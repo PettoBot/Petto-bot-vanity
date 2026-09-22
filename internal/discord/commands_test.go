@@ -216,3 +216,28 @@ func TestHelpSessionUpdateKeepsEphemeralFlagOutOfUpdatePayload(t *testing.T) {
 		t.Fatalf("message update unexpectedly changed flags: %v", data.Flags)
 	}
 }
+
+func TestLogsSetupAcceptsOptionalChannel(t *testing.T) {
+	var setup *discordgo.ApplicationCommandOption
+	for _, option := range logsOptions() {
+		if option.Name == "setup" {
+			setup = option
+			break
+		}
+	}
+	if setup == nil {
+		t.Fatal("/logs setup is missing")
+	}
+	for _, option := range setup.Options {
+		if option.Name == "channel" {
+			if option.Type != discordgo.ApplicationCommandOptionChannel {
+				t.Fatalf("/logs setup channel type = %v", option.Type)
+			}
+			if option.Required {
+				t.Fatal("/logs setup channel should remain optional so current channel is still supported")
+			}
+			return
+		}
+	}
+	t.Fatal("/logs setup is missing channel option")
+}

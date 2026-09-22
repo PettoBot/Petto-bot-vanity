@@ -333,10 +333,10 @@ func (b *Bot) handleEmbedPanelModal(event *discordgo.InteractionCreate) {
 		respond(event, "This embed editor belongs to another administrator.", true)
 		return
 	}
-	// Modal submits cannot use the component update callback type. Keep the
-	// database work bounded by the interaction deadline and return the updated
-	// editor as the modal's original response.
-	if err := interactionRespond(b.session, event, &discordgo.InteractionResponseData{}, discordgo.InteractionResponseDeferredChannelMessageWithSource); err != nil {
+	// This modal was opened from the editor message, so defer a message update
+	// instead of creating a new interaction response. InteractionResponseEdit
+	// below will then edit the original editor panel in place.
+	if err := interactionRespond(b.session, event, &discordgo.InteractionResponseData{}, embedModalDeferType()); err != nil {
 		b.logger.Error("defer embed editor modal failed", "error", err)
 		return
 	}
@@ -374,8 +374,12 @@ func (b *Bot) handleEmbedPanelModal(event *discordgo.InteractionCreate) {
 	b.updateEmbedPanel(event, response)
 }
 
+func embedModalDeferType() discordgo.InteractionResponseType {
+	return discordgo.InteractionResponseDeferredMessageUpdate
+}
+
 func (b *Bot) deferEmbedPanel(event *discordgo.InteractionCreate) bool {
-	if err := interactionRespond(b.session, event, &discordgo.InteractionResponseData{}, discordgo.InteractionResponseDeferredMessageUpdate); err != nil {
+	if err := interactionRespond(b.session, event, &discordgo.InteractionResponseData{}, embedModalDeferType()); err != nil {
 		b.logger.Error("defer embed editor update failed", "error", err)
 		return false
 	}

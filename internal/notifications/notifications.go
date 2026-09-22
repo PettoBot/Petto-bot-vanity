@@ -96,7 +96,8 @@ func variables(action identity.ActionEvent) embeds.Variables {
 		result = "completed"
 	}
 	vars := embeds.Variables{
-		UserID: action.UserID, UserMention: mention(action.UserID), RoleID: action.RoleID,
+		UserID: action.UserID, UserName: action.UserName, UserMention: mention(action.UserID),
+		UserAvatar: action.UserAvatar, UserDisplayName: action.UserDisplayName, RoleID: action.RoleID,
 		RuleName: ruleName, RuleSource: string(action.Source), RuleValue: action.Value,
 		RuleCondition: action.RuleCondition, RuleReason: action.Reason,
 		Action: string(action.Action), ActionText: "add", Result: result,

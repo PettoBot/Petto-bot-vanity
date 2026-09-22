@@ -156,3 +156,19 @@ func TestRawSyncUserDistinguishesNullPrimaryGuildFromOmitted(t *testing.T) {
 		t.Fatal("omitted primary_guild must remain unknown")
 	}
 }
+
+func TestSyncCandidateKeepsUserAndGuildAvatar(t *testing.T) {
+	candidate := syncCandidateFromRaw("guild", rawSyncMember{
+		User:   &rawSyncUser{ID: "user", Username: "liam", Avatar: "global-avatar"},
+		Avatar: "guild-avatar",
+	})
+	if candidate.Member == nil || candidate.Member.User == nil {
+		t.Fatal("sync candidate member is missing")
+	}
+	if candidate.Member.Avatar != "guild-avatar" {
+		t.Fatalf("guild avatar = %q", candidate.Member.Avatar)
+	}
+	if candidate.Member.User.Avatar != "global-avatar" {
+		t.Fatalf("user avatar = %q", candidate.Member.User.Avatar)
+	}
+}

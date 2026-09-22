@@ -1,9 +1,9 @@
 package logs
 
 import (
-	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PettoBot/vanity-tag-bot/internal/embeds"
 	"github.com/PettoBot/vanity-tag-bot/internal/identity"
@@ -15,21 +15,45 @@ func (f *fakeSender) ChannelMessageSendComplex(string, interface{}, ...interface
 	return nil, nil
 }
 
-func TestActionDedupeKeyIsStable(t *testing.T) {
-	logger := &Logger{}
-	ctx := context.Background()
-	// EmitAction has a nil sink guard after dedupe bookkeeping; use it to assert
-	// the same transition cannot create a second delivery attempt.
-	if err := logger.EmitAction(ctx, identity.ActionEvent{GuildID: "g", UserID: "u", RoleID: "r", Action: identity.ActionAddRole}); err != nil {
-		t.Fatal(err)
+func TestActionDedupeOnlySuppressesImmediateDuplicate(t *testing.T) {
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	logger := &Logger{now: func() time.Time { return now }}
+	action := identity.ActionEvent{
+		GuildID: "g", UserID: "u", RoleID: "r", RuleID: "rule",
+		Source: identity.SourceVanity, Action: identity.ActionAddRole, Result: "completed",
 	}
-	if err := logger.EmitAction(ctx, identity.ActionEvent{GuildID: "g", UserID: "u", RoleID: "r", Action: identity.ActionAddRole}); err != nil {
-		t.Fatal(err)
+	if !logger.shouldEmitAction(action) {
+		t.Fatal("first transition should be delivered")
 	}
-	logger.mu.Lock()
-	defer logger.mu.Unlock()
-	if len(logger.dedupe) != 1 {
-		t.Fatalf("got %d dedupe keys", len(logger.dedupe))
+	if logger.shouldEmitAction(action) {
+		t.Fatal("immediate duplicate should be suppressed")
+	}
+	now = now.Add(actionDedupeWindow + time.Millisecond)
+	if !logger.shouldEmitAction(action) {
+		t.Fatal("same legitimate transition must be allowed after the short dedupe window")
+	}
+}
+
+func TestActionDedupeSeparatesSourceAndRule(t *testing.T) {
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	logger := &Logger{now: func() time.Time { return now }}
+	base := identity.ActionEvent{
+		GuildID: "g", UserID: "u", RoleID: "r", RuleID: "vanity-rule",
+		Source: identity.SourceVanity, Action: identity.ActionAddRole, Result: "completed",
+	}
+	if !logger.shouldEmitAction(base) {
+		t.Fatal("first vanity action should be delivered")
+	}
+	tag := base
+	tag.Source = identity.SourceGuildTag
+	tag.RuleID = "tag-rule"
+	if !logger.shouldEmitAction(tag) {
+		t.Fatal("guild tag action must not be deduped against vanity")
+	}
+	otherRule := base
+	otherRule.RuleID = "other-vanity-rule"
+	if !logger.shouldEmitAction(otherRule) {
+		t.Fatal("different vanity rule must not share the same dedupe key")
 	}
 }
 

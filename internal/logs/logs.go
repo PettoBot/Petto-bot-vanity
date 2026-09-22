@@ -51,13 +51,16 @@ type Sender interface {
 	ChannelMessageSendComplex(string, *discordgo.MessageSend, ...discordgo.RequestOption) (*discordgo.Message, error)
 }
 
+const actionDedupeWindow = 5 * time.Second
+
 type Logger struct {
 	Store        *database.Store
 	Sender       Sender
 	ApproveEmoji string
 	DenyEmoji    string
+	now          func() time.Time
 	mu           sync.Mutex
-	dedupe       map[string]struct{}
+	dedupe       map[string]time.Time
 }
 
 func EventKeys() []string {
@@ -69,17 +72,9 @@ func DefaultTemplateName(eventKey string) string {
 }
 
 func (l *Logger) EmitAction(ctx context.Context, action identity.ActionEvent) error {
-	key := fmt.Sprintf("%s:%s:%s:%s:%s:%s", action.GuildID, action.UserID, action.RoleID, action.Action, action.Result, errorText(action.Error))
-	l.mu.Lock()
-	if l.dedupe == nil {
-		l.dedupe = make(map[string]struct{})
-	}
-	if _, exists := l.dedupe[key]; exists {
-		l.mu.Unlock()
+	if !l.shouldEmitAction(action) {
 		return nil
 	}
-	l.dedupe[key] = struct{}{}
-	l.mu.Unlock()
 	return l.Emit(ctx, Event{
 		GuildID: action.GuildID, UserID: action.UserID, RoleID: action.RoleID, RuleID: action.RuleID,
 		RuleName: action.RuleName, RuleCondition: action.RuleCondition, MatchField: action.MatchField, MatchedValue: action.MatchedValue,
@@ -87,6 +82,40 @@ func (l *Logger) EmitAction(ctx context.Context, action identity.ActionEvent) er
 		Source: action.Source, Action: action.Action, Value: action.Value, Reason: action.Reason,
 		Result: action.Result, Error: action.Error,
 	})
+}
+
+func (l *Logger) shouldEmitAction(action identity.ActionEvent) bool {
+	now := time.Now()
+	if l.now != nil {
+		now = l.now()
+	}
+	key := fmt.Sprintf("%s:%s:%s:%s:%s:%s:%s:%s",
+		action.GuildID, action.UserID, action.RoleID, action.Source, action.RuleID, action.Action, action.Result, errorText(action.Error))
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.dedupe == nil {
+		l.dedupe = make(map[string]time.Time)
+	}
+	if seenAt, exists := l.dedupe[key]; exists {
+		elapsed := now.Sub(seenAt)
+		if elapsed >= 0 && elapsed < actionDedupeWindow {
+			return false
+		}
+	}
+	l.dedupe[key] = now
+
+	// The dedupe cache is intentionally short lived. Opportunistically prune
+	// old entries so a long-running bot cannot grow this map without bound.
+	if len(l.dedupe) > 2048 {
+		cutoff := now.Add(-actionDedupeWindow)
+		for candidate, seenAt := range l.dedupe {
+			if seenAt.Before(cutoff) {
+				delete(l.dedupe, candidate)
+			}
+		}
+	}
+	return true
 }
 
 func (l *Logger) Emit(ctx context.Context, event Event) error {
